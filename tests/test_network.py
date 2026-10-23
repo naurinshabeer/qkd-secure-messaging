@@ -95,13 +95,17 @@ class NetworkTests(unittest.TestCase):
     def test_end_to_end_alice_to_bob_over_tcp(self):
         self.generate(1)
         result = self.service.send_message("Hello over a real TCP socket")
-        self.assertEqual(result["bob_text"], "Hello over a real TCP socket")
+        self.assertNotIn("bob_text", result)
+        inbox_status, inbox = http_call(self.bob.base_url + "/api/node/inbox")
+        self.assertEqual(inbox_status, 200)
+        self.assertEqual(inbox["label"], "Bob's inbox")
+        self.assertEqual(inbox["messages"][-1]["text"], "Hello over a real TCP socket")
         state = self.service.state()
         self.assertEqual(state["pool_count"], 0)
         self.assertEqual(state["bob_pool_count"], 0)
         self.assertEqual(state["sent_count"], 1)
 
-    def test_tampered_ciphertext_is_nacked_and_bobs_key_is_consumed(self):
+    def test_tampered_ciphertext_is_nacked_and_bobs_key_is_released(self):
         self.generate(1)
         _, allocation = http_call(self.alice.base_url + "/api/v1/keys/bob/enc_keys")
         item = allocation["keys"][0]
@@ -112,12 +116,12 @@ class NetworkTests(unittest.TestCase):
         ciphertext[-1] ^= 1
         with socket.create_connection(("127.0.0.1", self.bob.runtime.app_port), timeout=2) as sock:
             sock.settimeout(2)
-            send_frame(sock, Frame(TYPE_MESSAGE, key_id, nonce, bytes(ciphertext)))
+            send_frame(sock, Frame(TYPE_MESSAGE, key_id, nonce, bytes(ciphertext), "TAMPER", 1))
             response = recv_frame(sock)
         self.assertEqual(response.message_type, TYPE_NACK)
         self.assertIn(b"Authentication failed", response.payload)
-        status, repeated = http_call(self.bob.base_url + "/api/v1/keys/alice/dec_keys?" + urlencode({"key_ID": key_id}))
-        self.assertEqual(status, 409)
+        status, returned = http_call(self.bob.base_url + "/api/v1/keys/alice/dec_keys?" + urlencode({"key_ID": key_id}))
+        self.assertEqual(status, 200)
 
     def test_link_down_blocks_tcp_messaging_and_restore_allows_it(self):
         self.generate(1)
@@ -134,7 +138,7 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(bob_reply.message_type, TYPE_NACK)
         self.assertIn(b"link is down", bob_reply.payload)
         self.service.set_link(True)
-        self.assertEqual(self.service.send_message("restored")["bob_text"], "restored")
+        self.assertEqual(self.service.send_message("restored")["status"], "delivered")
 
     def test_empty_pool_and_unreachable_peer(self):
         with self.assertRaises(CoordinatorError) as empty:
@@ -144,7 +148,7 @@ class NetworkTests(unittest.TestCase):
         self.alice.runtime.peer_port = free_port()
         with self.assertRaises(RuntimeError):
             self.alice.runtime.send_message("peer is offline")
-        self.assertEqual(self.alice.runtime.kme.status("bob")["stored_key_count"], 0)
+        self.assertEqual(self.alice.runtime.kme.status("bob")["stored_key_count"], 1)
 
     def test_peer_read_timeout_is_handled(self):
         class SilentPeer(socketserver.BaseRequestHandler):
@@ -160,7 +164,7 @@ class NetworkTests(unittest.TestCase):
             self.alice.runtime.kme.import_keys([("QK-TIMEOUT", b"t" * 32)])
             with self.assertRaisesRegex(RuntimeError, "unreachable"):
                 self.alice.runtime.send_message("wait for timeout")
-            self.assertEqual(self.alice.runtime.kme.status("bob")["stored_key_count"], 0)
+            self.assertEqual(self.alice.runtime.kme.status("bob")["stored_key_count"], 1)
         finally:
             silent_server.shutdown()
             silent_server.server_close()
@@ -179,8 +183,8 @@ class NetworkTests(unittest.TestCase):
             truncated_reply = recv_frame(sock)
             self.assertEqual(truncated_reply.message_type, TYPE_NACK)
         self.generate(1)
-        self.assertEqual(self.service.send_message("listener remains alive")["bob_text"],
-                         "listener remains alive")
+        self.assertEqual(self.service.send_message("listener remains alive")["status"],
+                         "delivered")
 
 
 if __name__ == "__main__":

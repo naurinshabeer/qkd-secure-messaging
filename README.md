@@ -20,7 +20,7 @@ Relay is a computer-networks course prototype with separate Alice and Bob node p
        └── Alice KME REST :8766           Bob KME REST :8767 ──┘
 ```
 
-The coordinator contains no application key pool. It temporarily holds the SeQUeNCe output while provisioning it to both nodes, then reports only settings, measurements, key IDs, and counts to the browser. Alice and Bob store their own copies. Alice obtains a key through her `enc_keys` REST endpoint; Bob obtains the same ID's copy through `dec_keys`. Bob's decryption runs in Bob's process. The TCP reply carries Bob's successful decrypted receipt back to Alice so the dashboard can display the result.
+The coordinator contains no application key pool. It temporarily holds SeQUeNCe output while provisioning it to both nodes. The TCP ACK contains only a status and a short HMAC confirmation, never plaintext. Decrypted messages remain in Bob's process and are exposed by `GET /api/node/inbox`; the dashboard labels this view “Bob's inbox”.
 
 The coordinator simulates one quantum-link run in `qkd_demo/sequence_link.py`. It generates a single key ID for each matching key and posts the same ID/material pair to both KMEs. This HTTP provisioning operation is explicitly a software simulation of key distribution, not a simulated photon transmission between operating-system processes.
 
@@ -54,13 +54,13 @@ The peer identifier is the remote node: Alice asks for `bob`; Bob asks for `alic
 | `GET` or `POST /api/v1/keys/{peer_id}/enc_keys` | Reserves/consumes one available local key and returns `{"keys":[{"key_ID":"…","key":"<base64>"}]}`. |
 | `GET` or `POST /api/v1/keys/{peer_id}/dec_keys?key_ID=…` | Returns and consumes the local copy for that exact ID. |
 
-Error responses use JSON `{"error":"…"}`. Invalid fields or missing `key_ID` return **400**; unknown peer or unknown key ID returns **404**; empty pool, already-consumed key, duplicate ID, or capacity conflict returns **409**; node/link unavailable returns **503**. A key is delivered once per KME. The Alice copy is consumed when encryption starts; Bob's copy is consumed when Bob looks it up, including an authentication failure.
+Error responses use JSON `{"error":"…"}`. Invalid fields or missing `key_ID` return **400**; unknown peer or unknown key ID returns **404**; empty pool, already-consumed key, duplicate ID, or capacity conflict returns **409**; node/link unavailable returns **503**. A key is reserved by message ID, then committed only after Bob returns a valid authenticated ACK. Failed delivery releases Alice's reservation and tells Bob to discard his copy. Bob verifies GCM before committing his key, so unauthenticated frames do not burn it.
 
 Coordinator-to-KME provisioning uses `/api/node/import`, which accepts base64 key material and returns only an import count. It is an internal teaching endpoint with no authentication. It must not be exposed to an untrusted network. No HTTP request body is logged.
 
 ## TCP application protocol
 
-Alice's `/api/app/messages` endpoint requests a key from Alice's own REST KME, encrypts with AES-256-GCM, and opens a TCP connection to Bob. Bob's TCP handler parses a bounded frame, checks the link flag, requests the same key ID from Bob's KME, authenticates/decrypts the ciphertext, and returns an ACK or NACK. Alice's endpoint relays the Bob receipt to the coordinator UI. The wire layout and limits are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Alice's `/api/app/messages` endpoint requests a key from Alice's own REST KME, encrypts with AES-256-GCM, and opens a TCP connection to Bob. Bob's TCP handler parses a bounded frame, checks the link flag, requests the same key ID from Bob's KME, authenticates/decrypts the ciphertext, and returns an ACK or NACK. Alice's endpoint relays only Bob's authenticated status to the coordinator UI. The UI reads decrypted text from Bob's labelled inbox endpoint. The wire layout and limits are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 TCP framing uses `recv_exact` and a maximum frame/payload size. Truncated, oversized, unsupported-version, and invalid-length frames are rejected without taking down the listener. Socket connect/read timeouts, unreachable peers, unknown key IDs, and GCM authentication failures are handled as error responses. The inter-node link-failure control updates both node processes; Alice refuses to open a TCP connection while down, and Bob refuses inbound application frames while down. KME local management calls remain available.
 
@@ -116,7 +116,7 @@ Docker Compose creates three services on the user-defined bridge network `qkd-la
 docker compose up --build
 ```
 
-Open `http://127.0.0.1:8765`; stop with Ctrl+C, or in another terminal run `docker compose down`. For packet capture, select the Docker/WSL bridge interface used by your Docker Desktop backend; interface names and host visibility vary by Windows/Docker version. The Alice-to-Bob TCP application frame contains AES-GCM ciphertext. **The coordinator-to-KME provisioning requests carry simulated key bytes as base64 over plain HTTP**, so a capture of that provisioning traffic will reveal them. This is intentionally visible in the lab and is not a secure QKD deployment.
+Open `http://127.0.0.1:8765`; stop with Ctrl+C, or in another terminal run `docker compose down`. For packet capture, select the Docker/WSL bridge interface used by your Docker Desktop backend; interface names and host visibility vary by Windows/Docker version. The Alice-to-Bob TCP application frame contains AES-GCM ciphertext. **
 
 ## Dashboard walkthrough
 

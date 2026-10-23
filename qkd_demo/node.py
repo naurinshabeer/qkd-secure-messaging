@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import hashlib
+import hmac
 import secrets
 import socket
 import socketserver
@@ -64,6 +66,9 @@ class NodeRuntime:
         self._lock = threading.RLock()
         self._http: NodeHTTPServer | None = None
         self._tcp: AppTCPServer | None = None
+        self._sequence = 0
+        self._seen_ids: set[str] = set()
+        self._inbox: list[dict[str, str]] = []
 
     def set_link(self, up: bool) -> None:
         with self._lock:
@@ -77,17 +82,21 @@ class NodeRuntime:
         # Node apps use their own REST API, even though the API and app share a process.
         return f"http://127.0.0.1:{self.http_port}{path}"
 
-    def get_enc_key_via_api(self) -> tuple[str, bytes]:
-        route = f"/api/v1/keys/{self.peer_id}/enc_keys"
+    def get_enc_key_via_api(self, reservation: str) -> tuple[str, bytes]:
+        route = f"/api/node/reserve-enc?reservation=" + urllib.parse.quote(reservation)
         response = json_request(self._key_api_url(route), "POST", {})
         item = response["keys"][0]
         return item["key_ID"], base64.b64decode(item["key"], validate=True)
 
-    def get_dec_key_via_api(self, key_id: str) -> bytes:
-        query = urllib.parse.urlencode({"key_ID": key_id})
-        route = f"/api/v1/keys/{self.peer_id}/dec_keys?{query}"
+    def get_dec_key_via_api(self, key_id: str, reservation: str) -> bytes:
+        query = urllib.parse.urlencode({"key_ID": key_id, "reservation": reservation})
+        route = f"/api/node/reserve-dec?{query}"
         response = json_request(self._key_api_url(route), "GET")
         return base64.b64decode(response["keys"][0]["key"], validate=True)
+
+    def finish_key(self, key_id: str, reservation: str, action: str) -> None:
+        json_request(self._key_api_url("/api/node/finish"), "POST",
+                     {"key_ID": key_id, "reservation": reservation, "action": action})
 
     def send_message(self, text: str) -> dict[str, Any]:
         if self.role != "alice":
@@ -99,52 +108,68 @@ class NodeRuntime:
         if not self.peer_host or not self.peer_port:
             raise RuntimeError("Alice has no Bob application endpoint configured.")
 
-        key_id, key = self.get_enc_key_via_api()
+        message_id = secrets.token_hex(16).upper()
+        self._sequence += 1
+        sequence = self._sequence
+        reservation = message_id
+        key_id, key = self.get_enc_key_via_api(reservation)
         nonce = secrets.token_bytes(12)
         aad = key_id.encode("ascii")
         ciphertext = AESGCM(key).encrypt(nonce, text.encode("utf-8"), aad)
-        outgoing = Frame(TYPE_MESSAGE, key_id, nonce, ciphertext)
+        outgoing = Frame(TYPE_MESSAGE, key_id, nonce, ciphertext, message_id, sequence)
         try:
             with socket.create_connection((self.peer_host, self.peer_port), timeout=SOCKET_TIMEOUT) as sock:
                 sock.settimeout(SOCKET_TIMEOUT)
                 send_frame(sock, outgoing)
                 reply = recv_frame(sock)
         except (OSError, TimeoutError, ProtocolError) as exc:
+            self.finish_key(key_id, reservation, "release")
             raise RuntimeError("Bob is unreachable or did not return a valid response.") from exc
         if reply.message_type == TYPE_NACK:
+            self.finish_key(key_id, reservation, "release")
             raise RuntimeError(reply.payload.decode("utf-8", "replace") or "Bob rejected the message.")
-        if reply.message_type != TYPE_ACK or reply.key_id != key_id:
+        expected = hmac.new(key, message_id.encode("ascii") + b"\x01", hashlib.sha256).digest()
+        if (reply.message_type != TYPE_ACK or reply.key_id != key_id or
+                reply.message_id != message_id or reply.payload != b"\x01" + expected):
+            self.finish_key(key_id, reservation, "release")
             raise RuntimeError("Bob returned an invalid acknowledgement.")
-        try:
-            bob_text = reply.payload.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise RuntimeError("Bob returned an invalid receipt.") from exc
+        self.finish_key(key_id, reservation, "commit")
         return {
             "message_id": "MSG-" + key_id.removeprefix("QK-")[:12].upper(),
             "key_id": key_id,
             "nonce": base64.b64encode(nonce).decode("ascii"),
             "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
             "ciphertext_bytes": len(ciphertext),
-            "bob_text": bob_text,
+            "status": "delivered",
+            "message_id": message_id,
             "remaining_keys": len(self.kme.key_ids()),
         }
 
     def receive_message(self, frame: Frame) -> Frame:
         if self.role != "bob":
-            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Only Bob accepts incoming messages.")
+            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Only Bob accepts incoming messages.", frame.message_id or "invalid", frame.sequence)
         if not self.is_link_up():
-            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Simulated inter-node link is down.")
+            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Simulated inter-node link is down.", frame.message_id or "invalid", frame.sequence)
         if frame.message_type != TYPE_MESSAGE:
-            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Expected a message frame.")
+            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Expected a message frame.", frame.message_id or "invalid", frame.sequence)
+        if not frame.message_id or frame.message_id in self._seen_ids or frame.sequence <= getattr(self, "_last_sequence", 0):
+            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Replay rejected.", frame.message_id, frame.sequence)
+        reservation = frame.message_id
         try:
-            key = self.get_dec_key_via_api(frame.key_id)
+            key = self.get_dec_key_via_api(frame.key_id, reservation)
         except RuntimeError as exc:
-            return Frame(TYPE_NACK, frame.key_id, bytes(12), str(exc).encode("utf-8")[:512])
+            return Frame(TYPE_NACK, frame.key_id, bytes(12), str(exc).encode("utf-8")[:512], frame.message_id, frame.sequence)
         try:
             plaintext = AESGCM(key).decrypt(frame.nonce, frame.payload, frame.key_id.encode("ascii"))
         except (InvalidTag, ValueError):
-            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Authentication failed.")
-        return Frame(TYPE_ACK, frame.key_id, bytes(12), plaintext)
+            self.finish_key(frame.key_id, reservation, "release")
+            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Authentication failed.", frame.message_id, frame.sequence)
+        self.finish_key(frame.key_id, reservation, "commit")
+        self._seen_ids.add(frame.message_id)
+        self._last_sequence = frame.sequence
+        self._inbox.append({"message_id": frame.message_id, "text": plaintext.decode("utf-8", "replace")})
+        confirmation = hmac.new(key, frame.message_id.encode("ascii") + b"\x01", hashlib.sha256).digest()
+        return Frame(TYPE_ACK, frame.key_id, bytes(12), b"\x01" + confirmation, frame.message_id, frame.sequence)
 
 
 class NodeHTTPServer(ThreadingHTTPServer):
@@ -172,7 +197,7 @@ class AppTCPHandler(socketserver.BaseRequestHandler):
             frame = recv_frame(self.request)
             response = self.server.runtime.receive_message(frame)  # type: ignore[attr-defined]
         except (ProtocolError, OSError, TimeoutError):
-            response = Frame(TYPE_NACK, "invalid", bytes(12), b"Malformed, truncated, or timed-out frame.")
+            response = Frame(TYPE_NACK, "invalid", bytes(12), b"Malformed, truncated, or timed-out frame.", "invalid")
         try:
             send_frame(self.request, response)
         except (OSError, ProtocolError):
@@ -193,6 +218,8 @@ class NodeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if self.path.split("?", 1)[0] == "/api/node/inbox":
+            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:8765")
         self.end_headers()
         self.wfile.write(data)
 
@@ -238,6 +265,28 @@ class NodeHandler(BaseHTTPRequestHandler):
                 return self._send(200, {"key_ids": ids, "count": len(ids),
                                         "total_key_count": runtime.kme.total_count(),
                                         "limit": runtime.kme.limit, "link_up": runtime.is_link_up()})
+            if route.path == "/api/node/inbox" and method == "GET":
+                return self._send(200, {"label": "Bob's inbox", "messages": list(runtime._inbox)})
+            if route.path == "/api/node/reserve-enc" and method == "POST":
+                reservation = urllib.parse.parse_qs(route.query).get("reservation", [""])[0]
+                if not reservation: raise KMEError(400, "reservation is required.")
+                key_id, material = runtime.kme.reserve_enc(runtime.peer_id, reservation)
+                return self._send(200, {"keys": [{"key_ID": key_id, "key": base64.b64encode(material).decode("ascii")} ]})
+            if route.path == "/api/node/reserve-dec" and method == "GET":
+                query = urllib.parse.parse_qs(route.query)
+                key_id, reservation = query.get("key_ID", [""])[0], query.get("reservation", [""])[0]
+                if not key_id or not reservation: raise KMEError(400, "key_ID and reservation are required.")
+                material = runtime.kme.reserve_dec(runtime.peer_id, key_id, reservation)
+                return self._send(200, {"keys": [{"key_ID": key_id, "key": base64.b64encode(material).decode("ascii")} ]})
+            if route.path == "/api/node/finish" and method == "POST":
+                assert payload is not None
+                runtime.kme.finish(payload["key_ID"], payload["reservation"], commit=payload["action"] == "commit")
+                return self._send(200, {"finished": True})
+            if route.path == "/api/node/discard" and method == "POST":
+                assert payload is not None
+                key_id = payload["key_ID"]
+                runtime.kme.discard(key_id)
+                return self._send(200, {"discarded": True})
             if route.path == "/api/node/import" and method == "POST":
                 assert payload is not None
                 rows = payload.get("keys")
@@ -292,6 +341,13 @@ class NodeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         self._route("GET")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:8765")
+        self.send_header("Access-Control-Allow-Methods", "GET")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
         payload = {}

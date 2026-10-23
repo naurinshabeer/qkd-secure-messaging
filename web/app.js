@@ -80,6 +80,17 @@ function render(state) {
   $('event-list').innerHTML = state.events.map(event => `
     <div class="event ${event.level}"><span class="event-time">${timeLabel(event.time)}</span><span class="event-message"><i class="event-marker"></i>${escapeHtml(event.message)}</span><span class="event-result">${event.level.toUpperCase()}</span></div>
   `).join('');
+  refreshInbox(state.bob_inbox_url);
+}
+
+async function refreshInbox(url) {
+  if (!url) return;
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+    const latest = data.messages[data.messages.length - 1];
+    if (latest) $('delivery-result').innerHTML = `<div class="receipt"><div class="side-label"><span class="side-avatar bob">B</span><div><b>Bob's inbox</b><small>DECRYPTED ON BOB NODE</small></div></div><div class="receipt-head"><span>${escapeHtml(latest.message_id)}</span></div><p>${escapeHtml(latest.text)}</p></div>`;
+  } catch (_) { /* Bob's inbox remains available from Bob's node when it is online. */ }
 }
 
 async function refresh() { render(await request('/api/state')); }
@@ -121,7 +132,8 @@ $('send-message').addEventListener('click', async () => {
   $('send-message').disabled = true;
   try {
     const result = await request('/api/messages', {text:$('message').value});
-    $('delivery-result').innerHTML = `<div class="receipt"><div class="side-label"><span class="side-avatar bob">B</span><div><b>Bob</b><small>MESSAGE VERIFIED</small></div></div><div class="receipt-head"><span>AUTHENTICATED · ${escapeHtml(result.message_id)}</span></div><p>${escapeHtml(result.bob_text)}</p><div class="receipt-meta"><span>KEY</span><span>${escapeHtml(result.key_id)} · consumed</span><span>CIPHER</span><span>AES-256-GCM · ${result.ciphertext_bytes} bytes</span></div><p class="ciphertext">${escapeHtml(result.ciphertext)}</p></div>`;
+    await refresh();
+    await refreshInbox((await request('/api/state')).bob_inbox_url);
     $('message').value = '';
     $('char-count').textContent = '0 / 2,000';
     await refresh();

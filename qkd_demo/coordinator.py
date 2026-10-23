@@ -209,6 +209,7 @@ class CoordinatorService:
                 "last_run": self.last_run, "events": list(self.events),
                 "uptime_seconds": max(0, int(time.time() - self.started_at)),
                 "key_bytes": 32, "qber_limit": QBER_LIMIT, "simulator": "SeQUeNCe",
+                "bob_inbox_url": self.node_urls["bob"] + "/api/node/inbox",
             }
 
 
@@ -269,7 +270,7 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' http://127.0.0.1:8767; img-src 'self' data:")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)

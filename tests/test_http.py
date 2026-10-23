@@ -70,7 +70,10 @@ class CoordinatorHttpTests(unittest.TestCase):
         self.assertEqual(generated["state"]["bob_pool_count"], 1)
         status, delivered = self.post("/api/messages", {"text": "Through coordinator"})
         self.assertEqual(status, 200)
-        self.assertEqual(delivered["bob_text"], "Through coordinator")
+        self.assertNotIn("bob_text", delivered)
+        with urlopen(self.bob.base_url + "/api/node/inbox", timeout=3) as response:
+            inbox = json.loads(response.read())
+        self.assertEqual(inbox["messages"][-1]["text"], "Through coordinator")
         state = self.service.state()
         self.assertEqual(state["pool_count"], 0)
         self.assertEqual(state["bob_pool_count"], 0)

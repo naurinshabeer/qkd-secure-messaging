@@ -1,56 +1,32 @@
-# TCP application protocol (version 1)
+# TCP application protocol (version 2)
 
-This document specifies the application frame exchanged between Alice and Bob. It is a teaching protocol for this repository, not a standardized wire protocol. Integers are unsigned and big-endian. TCP is a byte stream, so every frame is prefixed with its body length and receivers must read exact field lengths; one `recv()` call is not assumed to return a whole frame.
+The educational message channel uses a length-prefixed TCP frame. Integers are unsigned big-endian. TCP is a byte stream; readers must loop until each field is complete. This is a project-specific format, not a standard and not a secure production protocol.
 
-## Frame layout
+## Byte layout
 
-The 4-byte length prefix is not counted in the frame-body length. The payload length counts payload bytes only. For a message frame, the payload is the AES-256-GCM ciphertext with its 16-byte authentication tag appended by `AESGCM.encrypt`.
+The first four bytes are the body length and are not included in the value. The body is:
 
-| Offset (from body start) | Size | Field | Encoding / meaning |
+| Body offset | Size | Field | Meaning |
 |---:|---:|---|---|
-| 0 | 1 byte | Version | `0x01` |
-| 1 | 1 byte | Message type | `0x01` message, `0x02` ACK, `0x03` NACK |
-| 2 | 2 bytes | Key ID length | Unsigned big-endian; 1–64 bytes |
-| 4 | variable | Key ID | ASCII, e.g. `QK-<uppercase UUID hex>` |
-| 4 + ID length | 12 bytes | Nonce | AES-GCM nonce. ACK/NACK use twelve zero bytes. |
-| 16 + ID length | 4 bytes | Payload length | Unsigned big-endian; maximum 16,384 bytes |
-| 20 + ID length | variable | Payload | Ciphertext+tag for type 1; UTF-8 receipt/error for ACK/NACK |
+| 0 | 1 | Version | `0x01` |
+| 1 | 1 | Type | `1` message, `2` ACK, `3` NACK |
+| 2 | 2 | Key ID length | unsigned big-endian |
+| 4 | 2 | Message ID length | unsigned big-endian |
+| 6 | 8 | Sequence | unsigned big-endian |
+| 14 | variable | Key ID | ASCII |
+| 14 + key ID length | variable | Message ID | ASCII |
+| following | 12 | Nonce | AES-GCM nonce (zero for receipt frames) |
+| following | 4 | Payload length | unsigned big-endian |
+| following | variable | Payload | ciphertext + GCM tag, ACK proof, or short NACK reason |
 
-A frame on the wire is:
+The outer prefix is `uint32 body_length`. The maximum payload is 16,384 bytes. Message AES-GCM associated data is the ASCII key ID. Alice reserves a matching key by message ID. Bob reserves his copy, authenticates the ciphertext, and only commits after successful GCM verification. A failure releases Bob's reservation. Alice commits only after verifying Bob's ACK; a failed delivery releases Alice's reservation and asks Bob to discard the matching copy.
 
-```text
-+--------------------------+------------------------------+
-| body length: uint32 BE   | body (length bytes)          |
-+--------------------------+------------------------------+
-```
+## ACK and replay behavior
 
-The minimum body size is 23 bytes (one-byte key ID). The maximum body size is 16,470 bytes (64-byte key ID and 16,384-byte payload). The implementation rejects frames outside those limits, unknown versions/types, non-ASCII or invalid-length IDs, inconsistent lengths, and oversized payloads. It closes/responds to malformed connections without terminating the listening server. A peer that stalls mid-frame is subject to the 3-second socket timeout.
+An ACK contains no plaintext. Its payload is status byte `0x01` followed by HMAC-SHA256 over `message_ID || status`, keyed directly by the message key in this teaching prototype. Alice verifies the HMAC before committing her reservation. Bob stores decrypted content only in his in-memory inbox, available at `GET /api/node/inbox` (labelled “Bob's inbox” in the dashboard).
 
-## Message types
+Bob rejects a duplicate message ID and any sequence number not greater than the last accepted sequence for the current process. Replay history is in-memory and resets when Bob restarts. This is not persistent replay protection.
 
-### 0x01 — Alice to Bob message
+## Failures and limitations
 
-The payload is UTF-8 plaintext encrypted with AES-256-GCM. The selected 32-byte key is fetched from Alice's `enc_keys` KME route. The key ID's ASCII bytes are used as AES-GCM associated data, so changing the ID invalidates authentication. Alice consumes her KME copy before attempting the TCP send.
-
-### 0x02 — Bob ACK
-
-Bob sends this only after retrieving and consuming the matching key from Bob's `dec_keys` API, successfully authenticating/decrypting, and decoding the UTF-8 plaintext. The ACK payload contains that plaintext as the local teaching dashboard receipt. The ACK frame uses the same key ID and a zero nonce. Since the ACK is plain TCP data, it is visible to anyone who can capture the lab network; this is not a production messaging design.
-
-### 0x03 — Bob NACK
-
-Bob returns a short UTF-8 error for a known protocol/application failure, such as link down, unknown/consumed key, malformed message type, or GCM authentication failure. Error payloads are limited to 512 bytes by the receiver. On truncated connections where a frame cannot be parsed, the receiver attempts a NACK with key ID `invalid`; if the socket is already closed, it simply closes the handler.
-
-## Failure and key-consumption behavior
-
-| Condition | Result |
-|---|---|
-| Alice has no key | KME returns HTTP 409; no TCP frame is sent. |
-| Bob does not know the key ID | Bob returns NACK after a 404 from his KME. |
-| Bob already consumed that key | Bob returns NACK after a 409 from his KME. |
-| Ciphertext or authenticated key ID is changed | AES-GCM raises `InvalidTag`; Bob returns NACK. Bob's key is already consumed. |
-| Alice cannot reach Bob / connect timeout | Alice's reserved key remains consumed; coordinator reports delivery failure. |
-| Truncated, oversized, bad-version or malformed frame | Handler rejects the frame; server process keeps listening. |
-| Simulated inter-node link is down | Alice does not connect and Bob rejects inbound frames. |
-
-An interruption after Alice consumes a key can leave Alice and Bob's available counts temporarily different. The coordinator reports per-node counts. Reset clears both pools. There is no automatic protocol for resynchronizing orphaned keys in this milestone.
-
+Truncated, oversized, malformed, timed-out, unknown-key, replayed, or GCM-invalid frames are rejected without terminating the listener. A GCM failure releases the reservation rather than burning Bob's available key. The two-phase flow reduces pool drift; a process crash between commit/rollback calls can still leave uncertain state. Key IDs and pending reservations are in-memory.
