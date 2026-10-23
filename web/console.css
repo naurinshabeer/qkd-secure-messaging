@@ -60,6 +60,7 @@ h2 { margin: 0; font-size: 17px; line-height: 1.2; font-weight: 500; letter-spac
 .photon-one { left: 28%; }.photon-two { left: 69%; opacity: .7; }
 .link-map.down .fibre-line { background: linear-gradient(90deg, #754c43 0 46%, transparent 46% 54%, #754c43 54%); }.link-map.down .photon { display: none; }
 .metric-row { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 14px; border: 1px solid var(--line); }
+.network-caption { display: flex; justify-content: space-between; gap: 12px; margin: 11px 2px 0; color: var(--muted); font-size: 8px; letter-spacing: .11em; }
 .metric { min-height: 79px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 11px 14px; border-right: 1px solid var(--line); }
 .metric:last-child { border-right: 0; }.metric-label { color: var(--dim); font-size: 8px; }.metric strong { font-size: 18px; line-height: 1.05; font-weight: 500; letter-spacing: -.03em; }.metric small { color: var(--muted); font-size: 9px; }.metric strong.bad { color: var(--red); }.metric strong.good { color: var(--mint); }
 .conditions { margin-top: 19px; }.conditions-head { justify-content: space-between; margin-bottom: 14px; }.conditions-head>div { align-items: start; flex-direction: column; gap: 3px; }.conditions-head>div>span { color: var(--muted); font-size: 10px; }
@@ -71,6 +72,7 @@ h2 { margin: 0; font-size: 17px; line-height: 1.2; font-weight: 500; letter-spac
 .vault-card { display: flex; flex-direction: column; }.vault-lock { color: var(--dim); font-size: 8px; }
 .vault-main { display: grid; grid-template-columns: .8fr 1.2fr; align-items: center; gap: 19px; margin: 28px 0 14px; }
 .vault-count { display: flex; flex-direction: column; }.vault-count strong { font-size: 55px; line-height: .95; font-weight: 400; letter-spacing: -.07em; color: var(--mint); }.vault-count span { margin-top: 9px; color: var(--muted); font-size: 10px; }
+.vault-count small { margin-top: 5px; color: var(--text-dim); font-size: 9px; }
 .capacity-line { display: flex; justify-content: space-between; color: var(--muted); font-size: 8px; }.capacity-line span:last-child { color: var(--ink); }
 .pool-meter { height: 5px; margin: 9px 0 14px; background: #293634; }.pool-meter div { width: 0; height: 100%; background: var(--mint-strong); transition: width .25s; }
 .key-spec { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; }.key-spec>span { color: var(--dim); font-size: 7px; }.key-spec b { color: #d8e0d9; font: 500 8px var(--mono); }

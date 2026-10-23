@@ -1,0 +1,29 @@
+services:
+  alice:
+    build: .
+    command: ["python", "-m", "qkd_demo.node", "--role", "alice", "--host", "0.0.0.0", "--port", "8766", "--app-host", "0.0.0.0", "--app-port", "8768", "--peer", "bob:8769"]
+    ports:
+      - "8766:8766"
+      - "8768:8768"
+    networks: [qkd_lab]
+
+  bob:
+    build: .
+    command: ["python", "-m", "qkd_demo.node", "--role", "bob", "--host", "0.0.0.0", "--port", "8767", "--app-host", "0.0.0.0", "--app-port", "8769"]
+    ports:
+      - "8767:8767"
+      - "8769:8769"
+    networks: [qkd_lab]
+
+  coordinator:
+    build: .
+    command: ["python", "-m", "qkd_demo.coordinator", "--host", "0.0.0.0", "--port", "8765", "--alice", "http://alice:8766", "--bob", "http://bob:8767"]
+    depends_on: [alice, bob]
+    ports:
+      - "8765:8765"
+    networks: [qkd_lab]
+
+networks:
+  qkd_lab:
+    name: qkd-lab-net
+    driver: bridge

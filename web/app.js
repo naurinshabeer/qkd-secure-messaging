@@ -26,7 +26,7 @@ function escapeHtml(value) { return String(value).replace(/[&<>"']/g, ch => ({'&
 function render(state) {
   const up = state.link_up;
   linkIsUp = up;
-  $('header-status').textContent = up ? 'Service online' : 'Link unavailable';
+  $('header-status').textContent = up ? 'Alice + Bob online' : 'Link or node unavailable';
   $('header-dot').style.background = up ? 'var(--mint-strong)' : 'var(--red)';
   $('link-tag').classList.toggle('down', !up);
   $('link-tag').querySelector('span').textContent = up ? 'LINK READY' : 'LINK FAILED';
@@ -63,7 +63,8 @@ function render(state) {
 
   const count = state.pool_count;
   $('pool-number').textContent = count;
-  $('pool-count').textContent = `${String(count).padStart(2,'0')} / ${state.pool_limit}`;
+  $('pool-count').textContent = `A ${String(count).padStart(2,'0')}/${state.pool_limit} · B ${String(state.bob_pool_count || 0).padStart(2,'0')}/${state.pool_limit}`;
+  $('bob-pool-count').textContent = `Bob: ${state.bob_pool_count || 0} ready`;
   $('pool-fill').style.width = `${count / state.pool_limit * 100}%`;
   $('pool-caption').textContent = count
     ? `${count} SeQUeNCe key${count === 1 ? '' : 's'} ready for one-time message use.`

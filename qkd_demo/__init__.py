@@ -1,1 +1,1 @@
-"""Software-emulated QKD key-management demonstration."""
+"""SeQUeNCe-backed, multi-process QKD network teaching prototype."""

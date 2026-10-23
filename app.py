@@ -1,6 +1,6 @@
-"""Launch the QKD secure messaging web prototype."""
+"""Launch the dashboard and simulated-link coordinator."""
 
-from qkd_demo.server import main
+from qkd_demo.coordinator import main
 
 
 if __name__ == "__main__":

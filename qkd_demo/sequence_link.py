@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import secrets
 import statistics
 from dataclasses import dataclass
@@ -59,8 +58,8 @@ def run_sequence_bb84(settings: LinkSettings, *, seed: int | None = None,
                       key_len: int = 256) -> dict[str, Any]:
     """Run one SeQUeNCe discrete-event BB84 and Cascade simulation.
 
-    Cascade's reconciled key values are returned only when Alice and Bob have
-    matching values and the observed BB84 QBER is below the UI's teaching
+    Matching Cascade key values are reported even when the measured QBER is
+    high; the coordinator decides whether to provision them using its teaching
     cutoff. This experiment is not a finite-key security proof.
     """
     _validate(settings)

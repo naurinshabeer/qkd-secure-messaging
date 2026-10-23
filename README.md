@@ -1,234 +1,144 @@
-# Relay: SeQUeNCe QKD Key Management and Secure Messaging
+# Relay: SeQUeNCe QKD Network and Secure Messaging Prototype
 
-Relay is a Windows-friendly course prototype that connects a SeQUeNCe BB84 + Cascade link simulation to a simple key-management service and an Alice-to-Bob encrypted messaging demonstration.
+Relay is a computer-networks course prototype with separate Alice and Bob node processes. Each node owns an independent in-memory Key Management Entity (KME), exposes a small key-delivery REST API, and runs an application endpoint. A third coordinator runs the SeQUeNCe link simulation, provisions matching simulator key material to both KMEs, and serves the dashboard.
 
-The flow is end to end:
-
-1. SeQUeNCe simulates a BB84 link over a configurable quantum channel.
-2. A custom QuantumChannel subclass can intercept and resend a selected fraction of photons.
-3. Paired Cascade protocols reconcile Alice's and Bob's keys.
-4. Matching simulator-produced keys enter a finite in-memory pool.
-5. Alice sends a message using one key; the local service encrypts, decrypts, verifies, and consumes that key.
-
-The browser frontend is a locally served operations console. It displays experiment conditions and measurements, pool inventory, message delivery, and link-failure controls.
-
-> **Scope and security:** This is a software simulation and teaching prototype. It does not send real photons or connect to QKD hardware. It uses matching SeQUeNCe Cascade key output to demonstrate key lifecycle and AES-256-GCM messaging. The QBER cutoff is a simplified teaching rule; this project does not provide a complete finite-key security proof or privacy-amplification analysis. Do not use it or its keys to protect real information.
-
-## Project structure
-
-~~~text
-qkd-secure-messaging/
-├── app.py                    # application entry point
-├── requirements.txt          # SeQUeNCe and AES-GCM dependencies
-├── qkd_demo/
-│   ├── __init__.py
-│   ├── engine.py              # key pool, service, and message flow
-│   ├── sequence_link.py       # SeQUeNCe BB84 + Cascade experiment
-│   └── server.py              # local HTTP server and JSON API
-├── web/
-│   ├── index.html             # frontend structure and labels
-│   ├── console.css            # responsive visual design
-│   └── app.js                 # browser behavior and API requests
-└── tests/
-    ├── test_engine.py         # SeQUeNCe checks and service tests
-    └── test_http.py           # frontend and API integration tests
-~~~
+> **Scope and security:** Only the quantum-link model is simulated. No photons or QKD hardware are used. This project does not provide a finite-key security proof or privacy amplification, and the classical control/key-provisioning channels are not authenticated or encrypted. It is a teaching prototype; do not use it or its keys to protect real information.
 
 ## Architecture
 
-~~~text
-┌──────────────────────┐       HTTP / JSON       ┌──────────────────────────┐
-│ Browser operations UI│ ◀─────────────────────▶ │ Python local HTTP server │
-│ web/                 │                          │ qkd_demo/server.py       │
-└──────────────────────┘                          └────────────┬─────────────┘
-                                                               │
-                                            ┌──────────────────▼─────────────┐
-                                            │ QKD service / key manager      │
-                                            │ finite pool, single-use policy │
-                                            └────────┬────────────────┬──────┘
-                                                     │                │
-                                      generate keys  │                │ send message
-                                                     ▼                ▼
-                                     ┌────────────────────────┐  ┌──────────────────┐
-                                     │ SeQUeNCe BB84 + Cascade│  │ AES-256-GCM      │
-                                     │ quantum-link simulation│  │ Alice → Bob demo │
-                                     └────────────────────────┘  └──────────────────┘
-~~~
+```text
+ Browser
+    │ HTTP dashboard/API :8765
+    ▼
+ Link coordinator ───── runs SeQUeNCe BB84 + Cascade once
+    │                   creates one key_ID per matching key
+    ├──── HTTP provision same key_ID + material ────► Alice KME :8766
+    └──── HTTP provision same key_ID + material ────► Bob KME   :8767
+                                                           │
+ Alice application ─── TCP AES-GCM frame ────────────────► Bob application :8769
+       │                                                       │
+       └── Alice KME REST :8766           Bob KME REST :8767 ──┘
+```
 
-### Modules
+The coordinator contains no application key pool. It temporarily holds the SeQUeNCe output while provisioning it to both nodes, then reports only settings, measurements, key IDs, and counts to the browser. Alice and Bob store their own copies. Alice obtains a key through her `enc_keys` REST endpoint; Bob obtains the same ID's copy through `dec_keys`. Bob's decryption runs in Bob's process. The TCP reply carries Bob's successful decrypted receipt back to Alice so the dashboard can display the result.
 
-| Module | Responsibility |
+The coordinator simulates one quantum-link run in `qkd_demo/sequence_link.py`. It generates a single key ID for each matching key and posts the same ID/material pair to both KMEs. This HTTP provisioning operation is explicitly a software simulation of key distribution, not a simulated photon transmission between operating-system processes.
+
+## Project structure
+
+```text
+app.py                         Dashboard/coordinator entry point
+qkd_demo/sequence_link.py      SeQUeNCe BB84, Eve channel, Cascade experiment
+qkd_demo/key_manager.py        Per-node in-memory KME and single-use key state
+qkd_demo/node.py               Alice/Bob REST service and TCP application endpoint
+qkd_demo/protocol.py           Bounded length-prefixed TCP frames
+qkd_demo/coordinator.py        Simulator orchestration, key provisioning, dashboard API
+web/                           Dashboard HTML, CSS and JavaScript
+docs/PROTOCOL.md               TCP wire format and examples
+tests/                         Simulator, KME, protocol and network integration tests
+Dockerfile
+docker-compose.yml
+```
+
+There is no database. Keys and experiment state are in memory and disappear when their processes stop or reset. The coordinator only displays Alice's available pool and Bob's available count; key bytes never enter the browser response.
+
+## Key-delivery API
+
+The node REST API is inspired by **ETSI GS QKD 014** paths and field names. This project is **modelled on** the standard; it is not ETSI-compliant. It simplifies authentication, key batch negotiation, TLS, endpoint discovery, error schemas, and lifecycle handling. Both `GET` and `POST` are accepted for key retrieval to make the lab easy to exercise.
+
+The peer identifier is the remote node: Alice asks for `bob`; Bob asks for `alice`.
+
+| Method and path | Result |
 |---|---|
-| qkd_demo/sequence_link.py | Creates the SeQUeNCe timeline, channels, Alice and Bob nodes, BB84 and Cascade protocols, and optional intercept-resend Eve channel. |
-| qkd_demo/engine.py | Runs an experiment, applies the demo acceptance rule, stores matching key material, and handles single-use message encryption. |
-| qkd_demo/server.py | Serves frontend files and the local API; binds to 127.0.0.1 by default. |
-| web/index.html | Defines the experiment, key-vault, messaging, and activity sections. |
-| web/console.css | Custom responsive styling without a UI framework or remote visual assets. |
-| web/app.js | Connects controls to the API and updates the interface. |
+| `GET /api/v1/keys/{peer_id}/status` | JSON status with endpoint IDs and available key count. |
+| `GET` or `POST /api/v1/keys/{peer_id}/enc_keys` | Reserves/consumes one available local key and returns `{"keys":[{"key_ID":"…","key":"<base64>"}]}`. |
+| `GET` or `POST /api/v1/keys/{peer_id}/dec_keys?key_ID=…` | Returns and consumes the local copy for that exact ID. |
 
-There is no database. Settings, keys, event history, and counters remain in process memory and are cleared when the server stops or the session is reset.
+Error responses use JSON `{"error":"…"}`. Invalid fields or missing `key_ID` return **400**; unknown peer or unknown key ID returns **404**; empty pool, already-consumed key, duplicate ID, or capacity conflict returns **409**; node/link unavailable returns **503**. A key is delivered once per KME. The Alice copy is consumed when encryption starts; Bob's copy is consumed when Bob looks it up, including an authentication failure.
 
-## SeQUeNCe experiment
+Coordinator-to-KME provisioning uses `/api/node/import`, which accepts base64 key material and returns only an import count. It is an internal teaching endpoint with no authentication. It must not be exposed to an untrusted network. No HTTP request body is logged.
 
-The run function in qkd_demo/sequence_link.py builds a discrete-event SeQUeNCe timeline. Alice and Bob are SeQUeNCe QKD nodes. It configures a light source, detectors, quantum channels, classical channels, and paired BB84 and Cascade protocols.
+## TCP application protocol
 
-The Eve option subclasses SeQUeNCe's QuantumChannel. Eve intercepts a configurable fraction of non-null photons, measures each intercepted photon in a random BB84 basis, and passes the resulting state onward. The measurement can disturb later results and increase QBER.
+Alice's `/api/app/messages` endpoint requests a key from Alice's own REST KME, encrypts with AES-256-GCM, and opens a TCP connection to Bob. Bob's TCP handler parses a bounded frame, checks the link flag, requests the same key ID from Bob's KME, authenticates/decrypts the ciphertext, and returns an ACK or NACK. Alice's endpoint relays the Bob receipt to the coordinator UI. The wire layout and limits are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-One run requests a 256-bit Cascade key generation frame. The service records:
+TCP framing uses `recv_exact` and a maximum frame/payload size. Truncated, oversized, unsupported-version, and invalid-length frames are rejected without taking down the listener. Socket connect/read timeouts, unreachable peers, unknown key IDs, and GCM authentication failures are handled as error responses. The inter-node link-failure control updates both node processes; Alice refuses to open a TCP connection while down, and Bob refuses inbound application frames while down. KME local management calls remain available.
 
-- Mean BB84 QBER and the number of BB84 error-rate samples.
-- How many Cascade keys SeQUeNCe generated and how many matched at Alice and Bob.
-- The number of photons Eve intercepted.
-- Cascade throughput and SeQUeNCe's privacy-throughput estimate.
-- Experiment settings and the seed.
+## Run locally on Windows (no Docker)
 
-Only matching Cascade key values from the two endpoints are eligible for the messaging demonstration. Each is stored as 32 bytes. A run can produce more keys than the pool can hold; the application imports up to the remaining pool capacity, which is 24 keys.
+Use Python 3.12. Create/install the project environment once:
 
-### Link controls and assumptions
-
-- **Fibre distance:** 1–50 km, passed to SeQUeNCe as channel distance.
-- **Channel noise:** the UI control ranges from 0% to 15% and maps to polarization fidelity using clamp(0.98 - noise, 0.5, 0.999). This is a model control, not calibrated hardware noise.
-- **Eve intercept rate:** 0–100% of non-null photons on the Alice-to-Bob quantum channel.
-- **QBER rule:** mean measured BB84 QBER must be below 11% to import keys. This is a teaching cutoff, not a security theorem.
-- **Key acceptance:** at least one matching Cascade key must exist and QBER must be below the cutoff.
-- **Reproducibility:** each run records a seed. Tests use fixed seeds; interactive runs use an unpredictable seed.
-
-Cascade reconciles errors in this model. The UI's Cascade rate is the simulator's privacy-throughput estimate; it is not proof that the app has a composably secure final key. The project does not add a separate finite-key privacy-amplification protocol.
-
-## Key management and message delivery
-
-The in-memory pool stores simulator key bytes and key IDs. The browser sees the IDs and pool count, never the key bytes.
-
-When Alice sends a message:
-
-1. The service checks the simulated link and key availability.
-2. It removes one key from the pool. Each key can be used once.
-3. AES-256-GCM encrypts the message with a fresh 96-bit nonce. The key ID is authenticated as associated data.
-4. Bob's local endpoint decrypts and verifies the ciphertext.
-5. The interface displays Bob's message, the consumed key ID, cipher, and ciphertext.
-
-If the pool is empty or the link is down, sending is blocked and an event is recorded. A link outage blocks message delivery in this demonstration even if some keys remain in the pool; it does not erase those keys.
-
-AES-GCM is authenticated symmetric encryption, not a one-time pad. The app demonstrates how a messaging service can consume QKD-simulated material; it does not prove the resulting communication secure.
-
-## Frontend
-
-The frontend uses plain HTML, CSS, and JavaScript:
-
-- **Experiment:** SeQUeNCe link drawing, distance/noise/Eve controls, QBER, Cascade key count, accept/reject decision, and estimated Cascade rate.
-- **Key vault:** current pool, capacity, key size, consumption rule, and key IDs.
-- **Message transfer:** Alice's message input and Bob's authenticated decryption receipt.
-- **Activity:** link-failure and restore controls, reset, and timestamped event log.
-
-The UI labels the link as simulated and exposes model notes. It has no UI framework, remote images, external fonts, database, or cloud dependency.
-
-## Windows setup
-
-Use 64-bit Python 3.12. Open PowerShell in the qkd-secure-messaging directory.
-
-~~~powershell
+```powershell
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-~~~
+```
 
-If the environment already exists, skip the first command. Start the prototype:
+Start each command in a **separate PowerShell window**, leaving all three open. Start Bob first:
 
-~~~powershell
-.\.venv\Scripts\python.exe app.py
-~~~
+```powershell
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+.\.venv\Scripts\python.exe -m qkd_demo.node --role bob --host 127.0.0.1 --port 8767 --app-port 8769
+```
 
-Open http://127.0.0.1:8765 in a browser. Stop the service with Ctrl+C in PowerShell. It binds to the local computer by default. If that port is already in use:
+Then Alice; `--peer` points to Bob's TCP application port:
 
-~~~powershell
-.\.venv\Scripts\python.exe app.py --port 8770
-~~~
+```powershell
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+.\.venv\Scripts\python.exe -m qkd_demo.node --role alice --host 127.0.0.1 --port 8766 --app-port 8768 --peer 127.0.0.1:8769
+```
 
-Then open http://127.0.0.1:8770.
+Then the link simulator, coordinator, and dashboard:
 
-## Demonstration walkthrough
+```powershell
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+.\.venv\Scripts\python.exe -m qkd_demo.coordinator --host 127.0.0.1 --port 8765 --alice http://127.0.0.1:8766 --bob http://127.0.0.1:8767
+```
 
-### Clean link and message
+Open `http://127.0.0.1:8765` in a browser on the same computer. Stop each process with Ctrl+C in its own terminal. By default every service binds to `127.0.0.1`; use `--host 0.0.0.0` and `--app-host 0.0.0.0` only for an isolated lab network that needs remote access.
 
-1. Keep the default 10 km, 1% noise, and 0% Eve settings.
-2. Choose **Run SeQUeNCe experiment**. The app runs BB84 and Cascade and reports QBER and matching Cascade keys.
-3. Show the key vault populate.
-4. Write a short message as Alice and select **Encrypt & send**.
-5. Show the authenticated receipt and the key count dropping by one.
+### Manual REST checks
 
-### Eve and high QBER
+With the three processes running, inspect status without retrieving any key:
 
-1. Set Eve interception to 100% and apply settings.
-2. Run SeQUeNCe again.
-3. Observe increased QBER and key rejection when the measured value crosses the teaching cutoff.
-4. Explain that this shows disturbance in this simulation; it is not a proof that every attack is detected.
+```powershell
+Invoke-RestMethod http://127.0.0.1:8766/api/v1/keys/bob/status
+Invoke-RestMethod http://127.0.0.1:8767/api/v1/keys/alice/status
+```
 
-### Link failure and key depletion
+Generate keys through the dashboard, or POST `{"count":2}` to `http://127.0.0.1:8765/api/keys/generate`. The coordinator simulates one link run and provisions up to the requested count to both KMEs with shared IDs.
 
-1. Select **Simulate link failure**. New generation and message actions stop.
-2. Restore the link and run another experiment.
-3. Send messages until the pool is empty; the next message is refused until new keys are generated.
+## Docker deployment and packet capture
 
-## API
+Docker Compose creates three services on the user-defined bridge network `qkd-lab-net`. Dashboard and node API/application ports are published to localhost for access and capture.
 
-| Method and route | Purpose |
-|---|---|
-| GET /api/state | Reads settings, last experiment, key IDs/count, counters, and recent events. |
-| POST /api/settings | Sets distance_km, channel_noise, and eve_fraction. |
-| POST /api/keys/generate | Runs one SeQUeNCe experiment and imports matching keys up to count and pool capacity. |
-| POST /api/messages | Encrypts and locally delivers a message using one available key. |
-| POST /api/link/fail | Marks the simulated link unavailable. |
-| POST /api/link/restore | Restores the link. |
-| POST /api/reset | Clears settings, pool, events, counters, and last-run state. |
+```powershell
+docker compose up --build
+```
 
-Example request bodies:
+Open `http://127.0.0.1:8765`; stop with Ctrl+C, or in another terminal run `docker compose down`. For packet capture, select the Docker/WSL bridge interface used by your Docker Desktop backend; interface names and host visibility vary by Windows/Docker version. The Alice-to-Bob TCP application frame contains AES-GCM ciphertext. **The coordinator-to-KME provisioning requests carry simulated key bytes as base64 over plain HTTP**, so a capture of that provisioning traffic will reveal them. This is intentionally visible in the lab and is not a secure QKD deployment.
 
-~~~json
-{"distance_km": 10, "channel_noise": 0.01, "eve_fraction": 0.25}
-{"count": 24}
-{"text": "Hello, Bob."}
-~~~
+## Dashboard walkthrough
 
-## Tests and initial smoke results
+1. Start Bob, Alice, and the coordinator. The dashboard should report both nodes online and show two separate pool counts.
+2. Leave the default 10 km, 1% noise, and 0% Eve settings. Click **Apply settings**, then **Run SeQUeNCe experiment**.
+3. Inspect measured mean QBER, matching Cascade keys, decision, and Cascade rate estimate. The coordinator creates one ID for each imported key and sends the same ID/key pair to both KMEs. Compare Alice and Bob pool counts.
+4. Send a short Alice message. Alice consumes her KME copy, sends ciphertext over TCP, and Bob consumes his matching copy and decrypts it. The receipt shown in the UI comes back from Bob's TCP handler. Both available counts decrease by one.
+5. Set Eve interception to 100%, apply, and run another simulation. Intercept-resend can raise QBER and trigger the simplified 11% teaching cutoff. Results are stochastic; repeat a run if measurements do not show the expected trend.
+6. Increase noise or distance, run again, and compare measured results. The controls are simulator parameters; do not claim calibrated fibre measurements.
+7. Use **Simulate link failure** and try sending. Both node application endpoints are told to reject traffic; **Restore link** re-enables them.
+8. Consume remaining keys to demonstrate the empty-pool conflict. **Reset session** clears both KME pools and resets the coordinator.
 
-Install dependencies, then run from this folder:
+## Tests
 
-~~~powershell
+Run from this directory:
+
+```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-~~~
+```
 
-Tests include real SeQUeNCe checks for a clean BB84 + Cascade run and full intercept-resend, plus service tests for input validation, key consumption, empty pools, link failure, and reset. HTTP tests cover the API and served frontend assets. They use a small deterministic experiment stub for the server's generation endpoint so API tests finish quickly.
+Tests use a deterministic SeQUeNCe stub for fast orchestration checks and real fixed-seed SeQUeNCe tests for clean/Eve behavior. Network tests start ephemeral localhost node services and cover shared key IDs/material, single-use APIs, unknown IDs/peers, partial reads, truncated/oversized frames, tampered ciphertext, end-to-end Alice→Bob messaging, link-down, peer failure, and empty pools.
 
-**Observed during development on 23 October 2026:** one clean 10 km run completed with 40 Cascade keys and about 1.54% mean QBER. One 100% intercept-resend run measured about 25.62% mean QBER and produced no Cascade keys. These are single-run smoke results, not statistically robust findings or guarantees. Interactive reruns can produce different results.
+## Course-project scope and remaining work
 
-## Mapping to the course report and presentation
-
-| Course section / slide | Suggested evidence |
-|---|---|
-| System architecture / Slide 4 | Architecture diagram and module table above. |
-| Detailed design / Slide 6 | SeQUeNCe link setup, pool lifecycle, local API, and message flow. |
-| Methodology / Slide 5 | BB84 channel, Eve experiment, QBER measurement, Cascade reconciliation, and acceptance rule. |
-| Database / UML / DFD | No database. Use the architecture diagram as a DFD and module table as component design. |
-| Module development | Module table and API routes. |
-| Working prototype / Slide 7 | Follow the live walkthrough. |
-| Implementation progress | Mark only work actually run in your environment; state limitations. |
-| Test cases / Slide 8 | Automated suite plus manual Eve, outage, and empty-pool demonstrations. |
-| Initial results / Slides 8–9 | Repeat runs with recorded settings and seeds; don't generalize from the smoke checks. |
-| Innovation and application / Slide 10 | Present this as an engineering integration, not a new BB84 protocol or a novel routing algorithm. |
-| Team contribution | Fill in real work by each member. |
-
-### Team contribution record
-
-| Member | Actual contribution | Evidence |
-|---|---|---|
-| Name | Fill in work personally completed | Files, commits, tests, or presentation work |
-
-## Limitations and future work
-
-- Add a justified privacy-amplification and finite-key analysis before making stronger security statements.
-- Run repeated trials by distance, noise, and Eve setting; retain each seed and configuration.
-- Add a second QKD link and a trusted relay with separate link key pools.
-- Add a documented key-delivery API if interoperability is part of the course scope.
-- Connect hardware only if the course has access to an actual QKD device and interface.
-- Persist experiment summaries if required, but do not store raw key material without a carefully designed key-management policy.
-
+This milestone demonstrates separate network processes, REST key delivery, TCP framing, per-node key state, simulation-backed key provisioning, and UI-mediated end-to-end message delivery. It does not implement a trusted relay for multi-hop paths, privacy amplification, an authenticated classical control channel, persistent key storage, production KME authentication, or statistical experiment sweeps. It does not claim real-world security.
