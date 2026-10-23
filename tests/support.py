@@ -1,6 +1,10 @@
 import socket
 import threading
 import time
+import os
+
+TEST_TOKEN = "unit-test-provision-token"
+os.environ.setdefault("QKD_PROVISION_TOKEN", TEST_TOKEN)
 
 from qkd_demo.node import AppTCPServer, NodeHTTPServer, NodeRuntime
 

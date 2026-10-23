@@ -6,7 +6,7 @@ from urllib.request import Request, urlopen
 from unittest.mock import patch
 
 from qkd_demo.coordinator import CoordinatorHTTPServer, CoordinatorService
-from support import NodeHarness
+from support import NodeHarness, TEST_TOKEN
 
 
 def fake_experiment(settings, *, seed=None):
@@ -31,6 +31,8 @@ class CoordinatorHttpTests(unittest.TestCase):
         cls.thread.start()
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
         cls.service = service
+        cls.alice.runtime.coordinator_url = cls.base
+        cls.bob.runtime.coordinator_url = cls.base
 
     @classmethod
     def tearDownClass(cls):
@@ -77,6 +79,21 @@ class CoordinatorHttpTests(unittest.TestCase):
         state = self.service.state()
         self.assertEqual(state["pool_count"], 0)
         self.assertEqual(state["bob_pool_count"], 0)
+
+    def test_coordinator_owned_link_state_blocks_node_provisioning(self):
+        with urlopen(self.base + "/api/link-state", timeout=2) as response:
+            self.assertTrue(json.loads(response.read())["up"])
+        self.service.set_link(False)
+        with urlopen(self.base + "/api/link-state", timeout=2) as response:
+            self.assertFalse(json.loads(response.read())["up"])
+        request = Request(self.alice.base_url + "/api/node/import",
+                          data=json.dumps({"keys": []}).encode(), method="POST",
+                          headers={"Content-Type": "application/json",
+                                   "Authorization": "Bearer " + TEST_TOKEN})
+        with self.assertRaises(HTTPError) as blocked:
+            urlopen(request, timeout=2)
+        self.assertEqual(blocked.exception.code, 503)
+        self.service.set_link(True)
 
 
 if __name__ == "__main__":

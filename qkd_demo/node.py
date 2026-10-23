@@ -7,6 +7,7 @@ import base64
 import json
 import hashlib
 import hmac
+import os
 import secrets
 import socket
 import socketserver
@@ -37,8 +38,12 @@ def message_aad(key_id: str, message_id: str, sequence: int, session_id: str) ->
 
 def json_request(url: str, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = os.getenv("QKD_PROVISION_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(url, data=data, method=method,
-                                    headers={"Content-Type": "application/json"})
+                                    headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
             return json.loads(response.read())
@@ -55,7 +60,8 @@ def json_request(url: str, method: str, payload: dict[str, Any] | None = None) -
 
 class NodeRuntime:
     def __init__(self, role: str, bind_host: str, http_port: int, app_host: str,
-                 app_port: int, peer_host: str | None, peer_port: int | None):
+                 app_port: int, peer_host: str | None, peer_port: int | None,
+                 *, insecure_dev: bool = False, coordinator_url: str | None = None):
         if role not in ("alice", "bob"):
             raise ValueError("role must be alice or bob")
         self.role = role
@@ -67,6 +73,9 @@ class NodeRuntime:
         self.app_port = app_port
         self.peer_host = peer_host
         self.peer_port = peer_port
+        self.provision_token = os.getenv("QKD_PROVISION_TOKEN")
+        self.insecure_dev = insecure_dev
+        self.coordinator_url = coordinator_url.rstrip("/") if coordinator_url else None
         self.kme = KeyManager(self.own_id, self.peer_id)
         self.link_up = True
         self._lock = threading.RLock()
@@ -84,6 +93,12 @@ class NodeRuntime:
             self.link_up = up
 
     def is_link_up(self) -> bool:
+        if self.coordinator_url:
+            try:
+                state = json_request(self.coordinator_url + "/api/link-state", "GET")
+                return bool(state.get("up"))
+            except RuntimeError:
+                return False
         with self._lock:
             return self.link_up
 
@@ -305,15 +320,27 @@ class NodeHandler(BaseHTTPRequestHandler):
         parts = route.path.strip("/").split("/")
         runtime = self.server.runtime
         try:
+            protected = route.path.startswith("/api/node/") and route.path not in (
+                "/api/node/keys", "/api/node/inbox")
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "keys"] and parts[4] in ("enc_keys", "dec_keys"):
+                protected = True
+            if protected and not runtime.insecure_dev:
+                supplied = self.headers.get("Authorization", "")
+                expected = "Bearer " + (runtime.provision_token or "")
+                if not runtime.provision_token or not hmac.compare_digest(
+                        supplied.encode("utf-8"), expected.encode("utf-8")):
+                    raise KMEError(403, "Valid provisioning token required.")
             if len(parts) == 5 and parts[:3] == ["api", "v1", "keys"]:
                 peer_id, operation = parts[3], parts[4]
                 if operation == "status" and method == "GET":
                     return self._send(200, runtime.kme.status(peer_id))
                 if operation == "enc_keys" and method in ("GET", "POST"):
+                    if not runtime.is_link_up(): raise KMEError(503, "Simulated link is down.")
                     key_id, material = runtime.kme.enc_key(peer_id)
                     return self._send(200, {"keys": [{"key_ID": key_id,
                                                        "key": base64.b64encode(material).decode("ascii")}]})
                 if operation == "dec_keys" and method in ("GET", "POST"):
+                    if not runtime.is_link_up(): raise KMEError(503, "Simulated link is down.")
                     query = urllib.parse.parse_qs(route.query)
                     key_ids = query.get("key_ID", [])
                     if not key_ids or not key_ids[0]:
@@ -330,11 +357,13 @@ class NodeHandler(BaseHTTPRequestHandler):
             if route.path == "/api/node/inbox" and method == "GET":
                 return self._send(200, {"label": "Bob's inbox", "messages": list(runtime._inbox)})
             if route.path == "/api/node/reserve-enc" and method == "POST":
+                if not runtime.is_link_up(): raise KMEError(503, "Simulated link is down.")
                 reservation = urllib.parse.parse_qs(route.query).get("reservation", [""])[0]
                 if not reservation: raise KMEError(400, "reservation is required.")
                 key_id, material = runtime.kme.reserve_enc(runtime.peer_id, reservation)
                 return self._send(200, {"keys": [{"key_ID": key_id, "key": base64.b64encode(material).decode("ascii")} ]})
             if route.path == "/api/node/reserve-dec" and method == "GET":
+                if not runtime.is_link_up(): raise KMEError(503, "Simulated link is down.")
                 query = urllib.parse.parse_qs(route.query)
                 key_id, reservation = query.get("key_ID", [""])[0], query.get("reservation", [""])[0]
                 if not key_id or not reservation: raise KMEError(400, "key_ID and reservation are required.")
@@ -350,6 +379,7 @@ class NodeHandler(BaseHTTPRequestHandler):
                 runtime.kme.discard(key_id)
                 return self._send(200, {"discarded": True})
             if route.path == "/api/node/import" and method == "POST":
+                if not runtime.is_link_up(): raise KMEError(503, "Simulated link is down.")
                 assert payload is not None
                 rows = payload.get("keys")
                 if not isinstance(rows, list):
@@ -452,7 +482,15 @@ def main() -> None:
     parser.add_argument("--app-host", default="127.0.0.1", help="TCP app bind host.")
     parser.add_argument("--app-port", type=int, help="TCP messaging port (default: REST port + 2).")
     parser.add_argument("--peer", help="Alice's Bob endpoint as HOST:PORT (Bob's TCP app port).")
+    parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator link-state endpoint.")
+    parser.add_argument("--insecure-dev", action="store_true", help="Explicitly disable provisioning-token checks for isolated tests.")
     args = parser.parse_args()
+    if args.host != "127.0.0.1" or args.app_host != "127.0.0.1":
+        parser.error("This prototype binds to 127.0.0.1 only.")
+    if urllib.parse.urlsplit(args.coordinator).hostname != "127.0.0.1":
+        parser.error("The coordinator must be on 127.0.0.1.")
+    if not os.getenv("QKD_PROVISION_TOKEN") and not args.insecure_dev:
+        parser.error("Set QKD_PROVISION_TOKEN or pass --insecure-dev.")
     http_port = args.port or (8766 if args.role == "alice" else 8767)
     app_port = args.app_port or http_port + 2
     peer_host, peer_port = (None, None)
@@ -460,10 +498,13 @@ def main() -> None:
         try:
             peer_host, port = args.peer.rsplit(":", 1)
             peer_port = int(port)
+            if peer_host != "127.0.0.1":
+                parser.error("Peer nodes must be on 127.0.0.1.")
         except ValueError as exc:
             parser.error("--peer must be HOST:PORT")
     run_node(NodeRuntime(args.role, args.host, http_port, args.app_host,
-                         app_port, peer_host, peer_port))
+                         app_port, peer_host, peer_port, insecure_dev=args.insecure_dev,
+                         coordinator_url=args.coordinator))
 
 
 if __name__ == "__main__":

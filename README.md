@@ -2,7 +2,7 @@
 
 Relay is a computer-networks course prototype with separate Alice and Bob node processes. Each node owns an independent in-memory Key Management Entity (KME), exposes a small key-delivery REST API, and runs an application endpoint. A third coordinator runs the SeQUeNCe link simulation, provisions matching simulator key material to both KMEs, and serves the dashboard.
 
-> **Scope and security:** Only the quantum-link model is simulated. No photons or QKD hardware are used. This project does not provide a finite-key security proof or privacy amplification, and the classical control/key-provisioning channels are not authenticated or encrypted. It is a teaching prototype; do not use it or its keys to protect real information.
+> **Scope and security:** The quantum channel and authenticated classical provisioning relationship are simulated; no photons or QKD hardware are used. This project does not provide a finite-key security proof or privacy amplification and is not a real-world secure deployment. It is a teaching prototype; do not use it or its keys to protect real information.
 
 ## Architecture
 
@@ -22,7 +22,7 @@ Relay is a computer-networks course prototype with separate Alice and Bob node p
 
 The coordinator contains no application key pool. It temporarily holds SeQUeNCe output while provisioning it to both nodes. The TCP ACK contains only a status and a short HMAC confirmation, never plaintext. Decrypted messages remain in Bob's process and are exposed by `GET /api/node/inbox`; the dashboard labels this view “Bob's inbox”.
 
-The coordinator simulates one quantum-link run in `qkd_demo/sequence_link.py`. It generates a single key ID for each matching key and posts the same ID/material pair to both KMEs. This HTTP provisioning operation is explicitly a software simulation of key distribution, not a simulated photon transmission between operating-system processes.
+The coordinator simulates one quantum-link run in `qkd_demo/sequence_link.py`. It generates a single key ID for each matching key and posts the same ID/material pair to both KMEs. The coordinator also models the authenticated classical channel needed by BB84: provisioning requests use the shared pre-shared token. The node checks that token in constant time. These are software simulations; no photons travel between operating-system processes.
 
 ## Project structure
 
@@ -51,18 +51,18 @@ The peer identifier is the remote node: Alice asks for `bob`; Bob asks for `alic
 | Method and path | Result |
 |---|---|
 | `GET /api/v1/keys/{peer_id}/status` | JSON status with endpoint IDs and available key count. |
-| `GET` or `POST /api/v1/keys/{peer_id}/enc_keys` | Reserves/consumes one available local key and returns `{"keys":[{"key_ID":"…","key":"<base64>"}]}`. |
+| `GET` or `POST /api/v1/keys/{peer_id}/enc_keys` | Consumes one available local key and returns `{"keys":[{"key_ID":"…","key":"<base64>"}]}`. |
 | `GET` or `POST /api/v1/keys/{peer_id}/dec_keys?key_ID=…` | Returns and consumes the local copy for that exact ID. |
 
 Error responses use JSON `{"error":"…"}`. Invalid fields or missing `key_ID` return **400**; unknown peer or unknown key ID returns **404**; empty pool, already-consumed key, duplicate ID, or capacity conflict returns **409**; node/link unavailable returns **503**. A key is reserved by message ID, then committed only after Bob returns a valid authenticated ACK. Failed delivery releases Alice's reservation and tells Bob to discard his copy. Bob verifies GCM before committing his key, so unauthenticated frames do not burn it.
 
-Coordinator-to-KME provisioning uses `/api/node/import`, which accepts base64 key material and returns only an import count. It is an internal teaching endpoint with no authentication. It must not be exposed to an untrusted network. No HTTP request body is logged.
+Coordinator-to-KME provisioning uses `/api/node/import` and related internal KME routes. They require `Authorization: Bearer $QKD_PROVISION_TOKEN`; nodes compare the token in constant time. The token must be set in every process environment. `--insecure-dev` explicitly disables this check for isolated local development. No HTTP request body is logged.
 
 ## TCP application protocol
 
-Alice's `/api/app/messages` endpoint requests a key from Alice's own REST KME, encrypts with AES-256-GCM, and opens a TCP connection to Bob. Bob's TCP handler parses a bounded frame, checks the link flag, requests the same key ID from Bob's KME, authenticates/decrypts the ciphertext, and returns an ACK or NACK. Alice's endpoint relays only Bob's authenticated status to the coordinator UI. The UI reads decrypted text from Bob's labelled inbox endpoint. The wire layout and limits are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Alice's `/api/app/messages` endpoint requests a key from Alice's own REST KME, encrypts with AES-256-GCM, and opens a TCP connection to Bob. Bob's TCP handler parses a bounded frame, checks the link flag, requests the same key ID from Bob's KME, authenticates/decrypts the ciphertext, and returns an ACK or NACK. Alice's endpoint relays only Bob's authenticated status to the coordinator UI. If the ACK is lost or fails verification, Alice asks Bob for a signed, idempotent outcome by message ID before committing or releasing her reservation; an unknown outcome stays reserved until its 30-second expiry. Frame IDs, session ID, and sequence are covered by AES-GCM associated data. The UI reads decrypted text from Bob's labelled inbox endpoint. The wire layout and limits are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-TCP framing uses `recv_exact` and a maximum frame/payload size. Truncated, oversized, unsupported-version, and invalid-length frames are rejected without taking down the listener. Socket connect/read timeouts, unreachable peers, unknown key IDs, and GCM authentication failures are handled as error responses. The inter-node link-failure control updates both node processes; Alice refuses to open a TCP connection while down, and Bob refuses inbound application frames while down. KME local management calls remain available.
+TCP framing uses `recv_exact` and a maximum frame/payload size. Truncated, oversized, unsupported-version, and invalid-length frames are rejected without taking down the listener. Socket connect/read timeouts, unreachable peers, unknown key IDs, and GCM authentication failures are handled as error responses. The coordinator owns the single LinkState and serves `GET /api/link-state`. Nodes consult it before provisioning, reserving keys, or accepting message frames. This shared state is a software simulation of link availability.
 
 ## Run locally on Windows (no Docker)
 
@@ -74,28 +74,31 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Start each command in a **separate PowerShell window**, leaving all three open. Start Bob first:
+Set the same token independently in all three PowerShell windows, then start each command in a separate window. Use a long random value for your local demo: `$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'`. Start Bob first:
 
 ```powershell
 cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
-.\.venv\Scripts\python.exe -m qkd_demo.node --role bob --host 127.0.0.1 --port 8767 --app-port 8769
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role bob --host 127.0.0.1 --port 8767 --app-port 8769 --coordinator http://127.0.0.1:8765
 ```
 
 Then Alice; `--peer` points to Bob's TCP application port:
 
 ```powershell
 cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
-.\.venv\Scripts\python.exe -m qkd_demo.node --role alice --host 127.0.0.1 --port 8766 --app-port 8768 --peer 127.0.0.1:8769
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role alice --host 127.0.0.1 --port 8766 --app-port 8768 --peer 127.0.0.1:8769 --coordinator http://127.0.0.1:8765
 ```
 
 Then the link simulator, coordinator, and dashboard:
 
 ```powershell
 cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
 .\.venv\Scripts\python.exe -m qkd_demo.coordinator --host 127.0.0.1 --port 8765 --alice http://127.0.0.1:8766 --bob http://127.0.0.1:8767
 ```
 
-Open `http://127.0.0.1:8765` in a browser on the same computer. Stop each process with Ctrl+C in its own terminal. By default every service binds to `127.0.0.1`; use `--host 0.0.0.0` and `--app-host 0.0.0.0` only for an isolated lab network that needs remote access.
+Open `http://127.0.0.1:8765` in a browser on the same computer. Stop each process with Ctrl+C in its own terminal. Every process is restricted to `127.0.0.1`. Both node and coordinator refuse startup without the token unless `--insecure-dev` is explicitly passed. The coordinator must be running before the nodes can provision or deliver messages because each node checks its `/api/link-state` endpoint. Use the same token in every window. `--insecure-dev` is for a completely isolated local experiment only and must be passed to each process.
 
 ### Manual REST checks
 
@@ -141,4 +144,4 @@ Tests use a deterministic SeQUeNCe stub for fast orchestration checks and real f
 
 ## Course-project scope and remaining work
 
-This milestone demonstrates separate network processes, REST key delivery, TCP framing, per-node key state, simulation-backed key provisioning, and UI-mediated end-to-end message delivery. It does not implement a trusted relay for multi-hop paths, privacy amplification, an authenticated classical control channel, persistent key storage, production KME authentication, or statistical experiment sweeps. It does not claim real-world security.
+This milestone demonstrates separate network processes, REST key delivery, TCP framing, per-node key state, simulation-backed key provisioning, and UI-mediated end-to-end message delivery. It does not implement a trusted relay for multi-hop paths, privacy amplification, a real authenticated classical channel, persistent key storage, production KME authentication, or statistical experiment sweeps. It does not claim real-world security.

@@ -26,13 +26,28 @@ class CoordinatorError(Exception):
         self.status = status
 
 
+class LinkState:
+    """Coordinator-owned switch for the simulated Alice-Bob classical/quantum link."""
+    def __init__(self, up: bool = True):
+        self._up = up
+        self._lock = threading.Lock()
+
+    def get(self) -> bool:
+        with self._lock:
+            return self._up
+
+    def set(self, up: bool) -> None:
+        with self._lock:
+            self._up = up
+
+
 class CoordinatorService:
     """Owns experiment metadata only; Alice and Bob retain separate KME pools."""
 
     def __init__(self, alice_url: str, bob_url: str):
         self.node_urls = {"alice": alice_url.rstrip("/"), "bob": bob_url.rstrip("/")}
         self.settings = LinkSettings()
-        self.link_up = True
+        self.link_state = LinkState(True)
         self.last_run: dict[str, Any] | None = None
         self.events: list[dict[str, Any]] = []
         self.sent_count = 0
@@ -40,6 +55,14 @@ class CoordinatorService:
         self.started_at = time.time()
         self._lock = threading.RLock()
         self._event("Coordinator ready · independent Alice and Bob nodes", "info")
+
+    @property
+    def link_up(self) -> bool:
+        return self.link_state.get()
+
+    @link_up.setter
+    def link_up(self, up: bool) -> None:
+        self.link_state.set(up)
 
     def _event(self, message: str, level: str) -> None:
         self.events.insert(0, {"id": uuid.uuid4().hex[:8], "time": time.time(),
@@ -134,6 +157,7 @@ class CoordinatorService:
 
     def set_link(self, up: bool) -> dict[str, Any]:
         with self._lock:
+            self.link_state.set(up)
             results: list[dict[str, Any]] = []
             errors: list[str] = []
             for role in ("alice", "bob"):
@@ -141,7 +165,6 @@ class CoordinatorService:
                     results.append(self._node(role, "/api/node/link", "POST", {"up": up}))
                 except CoordinatorError as exc:
                     errors.append(str(exc))
-            self.link_up = up and len(results) == 2
             if errors:
                 self._event("Link control failed to reach both nodes", "warning")
                 raise CoordinatorError(503, "; ".join(errors))
@@ -255,6 +278,9 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path == "/api/link-state":
+            return self._send(200, {"up": self.server.service.link_up,
+                                    "label": "simulated shared link state"})
         if path == "/api/state":
             try:
                 return self._send(200, self.server.service.state())
@@ -312,7 +338,14 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=int(os.getenv("COORDINATOR_PORT", "8765")))
     parser.add_argument("--alice", default=os.getenv("ALICE_URL", "http://127.0.0.1:8766"))
     parser.add_argument("--bob", default=os.getenv("BOB_URL", "http://127.0.0.1:8767"))
+    parser.add_argument("--insecure-dev", action="store_true", help="Allow startup without QKD_PROVISION_TOKEN for isolated development only.")
     args = parser.parse_args()
+    if args.host != "127.0.0.1":
+        parser.error("This prototype binds to 127.0.0.1 only.")
+    if any(urlparse(url).hostname != "127.0.0.1" for url in (args.alice, args.bob)):
+        parser.error("Alice and Bob must be on 127.0.0.1.")
+    if not os.getenv("QKD_PROVISION_TOKEN") and not args.insecure_dev:
+        parser.error("Set QKD_PROVISION_TOKEN or pass --insecure-dev.")
     server = CoordinatorHTTPServer((args.host, args.port), CoordinatorService(args.alice, args.bob))
     print(f"Coordinator and dashboard listening at http://{args.host}:{args.port}")
     try:

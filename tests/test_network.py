@@ -2,6 +2,9 @@ import base64
 import json
 import socket
 import socketserver
+import os
+import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -15,7 +18,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from qkd_demo.coordinator import CoordinatorError, CoordinatorService
 from qkd_demo.protocol import TYPE_MESSAGE, TYPE_NACK, TYPE_OUTCOME_QUERY, Frame, recv_frame, send_frame
 from qkd_demo.node import message_aad
-from support import NodeHarness, free_port
+from support import NodeHarness, TEST_TOKEN, free_port
 
 
 def fake_experiment(settings, *, seed=None):
@@ -32,10 +35,13 @@ def fake_experiment(settings, *, seed=None):
     }
 
 
-def http_call(url, method="GET", payload=None):
+def http_call(url, method="GET", payload=None, token=TEST_TOKEN):
     data = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = "Bearer " + token
     request = Request(url, data=data, method=method,
-                      headers={"Content-Type": "application/json"})
+                      headers=headers)
     try:
         with urlopen(request, timeout=3) as response:
             return response.status, json.loads(response.read())
@@ -92,6 +98,25 @@ class NetworkTests(unittest.TestCase):
         status, second_use = http_call(
             self.bob.base_url + "/api/v1/keys/alice/dec_keys?" + urlencode({"key_ID": key_id}))
         self.assertEqual(status, 409)
+
+    def test_provisioning_requires_correct_token(self):
+        url = self.alice.base_url + "/api/node/import"
+        row = {"key_ID": "QK-AUTH", "key": base64.b64encode(b"x" * 32).decode("ascii")}
+        self.assertEqual(http_call(url, "POST", {"keys": [row]}, token=None)[0], 403)
+        self.assertEqual(http_call(url, "POST", {"keys": [row]}, token="wrong")[0], 403)
+        self.assertEqual(http_call(url, "POST", {"keys": [row]}, token=TEST_TOKEN)[0], 200)
+
+    def test_node_and_coordinator_refuse_start_without_token(self):
+        environment = os.environ.copy()
+        environment.pop("QKD_PROVISION_TOKEN", None)
+        for command in (
+            [sys.executable, "-m", "qkd_demo.node", "--role", "bob"],
+            [sys.executable, "-m", "qkd_demo.coordinator"],
+        ):
+            result = subprocess.run(command, cwd=os.getcwd(), env=environment,
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("QKD_PROVISION_TOKEN", result.stderr)
 
     def test_end_to_end_alice_to_bob_over_tcp(self):
         self.generate(1)
