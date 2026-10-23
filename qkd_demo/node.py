@@ -14,6 +14,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -22,11 +23,16 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from qkd_demo.key_manager import KMEError, KeyManager
 from qkd_demo.protocol import (
-    TYPE_ACK, TYPE_MESSAGE, TYPE_NACK, Frame, ProtocolError, recv_frame, send_frame,
+    TYPE_ACK, TYPE_MESSAGE, TYPE_NACK, TYPE_OUTCOME, TYPE_OUTCOME_QUERY, Frame, ProtocolError, recv_frame, send_frame,
 )
 
 HTTP_TIMEOUT = 3.0
 SOCKET_TIMEOUT = 3.0
+
+
+def message_aad(key_id: str, message_id: str, sequence: int, session_id: str) -> bytes:
+    return (key_id.encode("ascii") + b"\x00" + message_id.encode("ascii") + b"\x00" +
+            sequence.to_bytes(8, "big") + b"\x00" + session_id.encode("ascii"))
 
 
 def json_request(url: str, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -67,7 +73,10 @@ class NodeRuntime:
         self._http: NodeHTTPServer | None = None
         self._tcp: AppTCPServer | None = None
         self._sequence = 0
-        self._seen_ids: set[str] = set()
+        self._session_id = uuid.uuid4().hex
+        self._seen_ids: set[tuple[str, str]] = set()
+        self._last_sequence: dict[str, int] = {}
+        self._outcomes: dict[tuple[str, str], tuple[int, str, bytes]] = {}
         self._inbox: list[dict[str, str]] = []
 
     def set_link(self, up: bool) -> None:
@@ -114,28 +123,33 @@ class NodeRuntime:
         reservation = message_id
         key_id, key = self.get_enc_key_via_api(reservation)
         nonce = secrets.token_bytes(12)
-        aad = key_id.encode("ascii")
+        aad = message_aad(key_id, message_id, sequence, self._session_id)
         ciphertext = AESGCM(key).encrypt(nonce, text.encode("utf-8"), aad)
-        outgoing = Frame(TYPE_MESSAGE, key_id, nonce, ciphertext, message_id, sequence)
+        outgoing = Frame(TYPE_MESSAGE, key_id, nonce, ciphertext, message_id, sequence, self._session_id)
         try:
             with socket.create_connection((self.peer_host, self.peer_port), timeout=SOCKET_TIMEOUT) as sock:
                 sock.settimeout(SOCKET_TIMEOUT)
                 send_frame(sock, outgoing)
                 reply = recv_frame(sock)
-        except (OSError, TimeoutError, ProtocolError) as exc:
-            self.finish_key(key_id, reservation, "release")
-            raise RuntimeError("Bob is unreachable or did not return a valid response.") from exc
-        if reply.message_type == TYPE_NACK:
-            self.finish_key(key_id, reservation, "release")
-            raise RuntimeError(reply.payload.decode("utf-8", "replace") or "Bob rejected the message.")
+        except (OSError, TimeoutError, ProtocolError):
+            reply = None
         expected = hmac.new(key, message_id.encode("ascii") + b"\x01", hashlib.sha256).digest()
-        if (reply.message_type != TYPE_ACK or reply.key_id != key_id or
-                reply.message_id != message_id or reply.payload != b"\x01" + expected):
+        valid_ack = bool(reply and reply.message_type == TYPE_ACK and reply.key_id == key_id and
+                         reply.message_id == message_id and reply.session_id == self._session_id and
+                         reply.payload[:1] == b"\x01" and hmac.compare_digest(reply.payload[1:], expected))
+        if valid_ack:
+            outcome = 1
+        else:
+            outcome = self.query_outcome(key_id, message_id, sequence, key)
+        if outcome == 1:
+            self.finish_key(key_id, reservation, "commit")
+        elif outcome == 2:
             self.finish_key(key_id, reservation, "release")
-            raise RuntimeError("Bob returned an invalid acknowledgement.")
-        self.finish_key(key_id, reservation, "commit")
+            raise RuntimeError("Bob rejected the message; Alice's key was released.")
+        else:
+            # Unknown is not proof of non-consumption. Keep it reserved until KME expiry.
+            raise RuntimeError("Bob's outcome is unknown; key remains reserved pending reconciliation.")
         return {
-            "message_id": "MSG-" + key_id.removeprefix("QK-")[:12].upper(),
             "key_id": key_id,
             "nonce": base64.b64encode(nonce).decode("ascii"),
             "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
@@ -145,31 +159,79 @@ class NodeRuntime:
             "remaining_keys": len(self.kme.key_ids()),
         }
 
+    def query_outcome(self, key_id: str, message_id: str, sequence: int, key: bytes) -> int:
+        query = Frame(TYPE_OUTCOME_QUERY, key_id, bytes(12), b"", message_id, sequence, self._session_id)
+        try:
+            with socket.create_connection((self.peer_host, self.peer_port), timeout=SOCKET_TIMEOUT) as sock:
+                sock.settimeout(SOCKET_TIMEOUT)
+                send_frame(sock, query)
+                reply = recv_frame(sock)
+        except (OSError, TimeoutError, ProtocolError):
+            return 0
+        status = reply.payload[:1]
+        if reply.message_type != TYPE_OUTCOME or reply.key_id != key_id or reply.message_id != message_id or reply.session_id != self._session_id:
+            return 0
+        expected = hmac.new(key, b"outcome" + message_id.encode("ascii") + self._session_id.encode("ascii") + status, hashlib.sha256).digest()
+        if len(reply.payload) != 33 or not hmac.compare_digest(reply.payload[1:], expected):
+            return 0
+        return status[0] if status and status[0] in (1, 2) else 0
+
     def receive_message(self, frame: Frame) -> Frame:
         if self.role != "bob":
             return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Only Bob accepts incoming messages.", frame.message_id or "invalid", frame.sequence)
         if not self.is_link_up():
             return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Simulated inter-node link is down.", frame.message_id or "invalid", frame.sequence)
+        if frame.message_type == TYPE_OUTCOME_QUERY:
+            return self._outcome_reply(frame)
         if frame.message_type != TYPE_MESSAGE:
             return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Expected a message frame.", frame.message_id or "invalid", frame.sequence)
-        if not frame.message_id or frame.message_id in self._seen_ids or frame.sequence <= getattr(self, "_last_sequence", 0):
-            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Replay rejected.", frame.message_id, frame.sequence)
+        replay_key = (frame.session_id, frame.message_id)
+        if not frame.message_id or replay_key in self._seen_ids or frame.sequence <= self._last_sequence.get(frame.session_id, 0):
+            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Replay rejected.", frame.message_id, frame.sequence, frame.session_id)
         reservation = frame.message_id
         try:
             key = self.get_dec_key_via_api(frame.key_id, reservation)
         except RuntimeError as exc:
-            return Frame(TYPE_NACK, frame.key_id, bytes(12), str(exc).encode("utf-8")[:512], frame.message_id, frame.sequence)
+            return Frame(TYPE_NACK, frame.key_id, bytes(12), str(exc).encode("utf-8")[:512], frame.message_id, frame.sequence, frame.session_id)
         try:
-            plaintext = AESGCM(key).decrypt(frame.nonce, frame.payload, frame.key_id.encode("ascii"))
+            plaintext = AESGCM(key).decrypt(frame.nonce, frame.payload,
+                                            message_aad(frame.key_id, frame.message_id, frame.sequence, frame.session_id))
         except (InvalidTag, ValueError):
             self.finish_key(frame.key_id, reservation, "release")
-            return Frame(TYPE_NACK, frame.key_id, bytes(12), b"Authentication failed.", frame.message_id, frame.sequence)
+            self._outcomes[replay_key] = (2, frame.key_id, key)
+            return self._signed_reply(TYPE_NACK, frame, 2, key)
         self.finish_key(frame.key_id, reservation, "commit")
-        self._seen_ids.add(frame.message_id)
-        self._last_sequence = frame.sequence
+        self._seen_ids.add(replay_key)
+        self._last_sequence[frame.session_id] = frame.sequence
+        self._outcomes[replay_key] = (1, frame.key_id, key)
         self._inbox.append({"message_id": frame.message_id, "text": plaintext.decode("utf-8", "replace")})
-        confirmation = hmac.new(key, frame.message_id.encode("ascii") + b"\x01", hashlib.sha256).digest()
-        return Frame(TYPE_ACK, frame.key_id, bytes(12), b"\x01" + confirmation, frame.message_id, frame.sequence)
+        return self._signed_reply(TYPE_ACK, frame, 1, key)
+
+    def _signed_reply(self, typ: int, frame: Frame, status: int, key: bytes) -> Frame:
+        status_byte = bytes([status])
+        proof = hmac.new(key, frame.message_id.encode("ascii") + status_byte, hashlib.sha256).digest()
+        return Frame(typ, frame.key_id, bytes(12), status_byte + proof,
+                     frame.message_id, frame.sequence, frame.session_id)
+
+    def _outcome_reply(self, frame: Frame) -> Frame:
+        known = self._outcomes.get((frame.session_id, frame.message_id))
+        if known is not None and known[1] == frame.key_id:
+            return self._outcome_signed(frame, known[0], known[2])
+        try:
+            key = self.get_dec_key_via_api(frame.key_id, "outcome:" + frame.message_id)
+        except RuntimeError:
+            return Frame(TYPE_OUTCOME, frame.key_id, bytes(12), b"\x00" + bytes(32),
+                         frame.message_id, frame.sequence, frame.session_id)
+        self.finish_key(frame.key_id, "outcome:" + frame.message_id, "release")
+        self._outcomes[(frame.session_id, frame.message_id)] = (2, frame.key_id, key)
+        return self._outcome_signed(frame, 2, key)
+
+    def _outcome_signed(self, frame: Frame, status: int, key: bytes) -> Frame:
+        status_byte = bytes([status])
+        proof = hmac.new(key, b"outcome" + frame.message_id.encode("ascii") +
+                         frame.session_id.encode("ascii") + status_byte, hashlib.sha256).digest()
+        return Frame(TYPE_OUTCOME, frame.key_id, bytes(12), status_byte + proof,
+                     frame.message_id, frame.sequence, frame.session_id)
 
 
 class NodeHTTPServer(ThreadingHTTPServer):

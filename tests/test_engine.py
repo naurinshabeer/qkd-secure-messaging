@@ -1,4 +1,6 @@
 import unittest
+import time
+from unittest.mock import patch
 
 from qkd_demo.key_manager import KMEError, KeyManager
 from qkd_demo.sequence_link import LinkSettings, run_sequence_bb84
@@ -26,6 +28,24 @@ class SeQUeNCeLinkTests(unittest.TestCase):
 
 
 class KeyManagerTests(unittest.TestCase):
+    def test_reserve_commit_release_and_stale_reservation_expiry(self):
+        manager = KeyManager("alice", "bob")
+        manager.import_keys([("QK-ONE", b"a" * 32)])
+        key_id, key = manager.reserve_enc("bob", "attempt-1")
+        self.assertEqual((key_id, key), ("QK-ONE", b"a" * 32))
+        with self.assertRaises(KMEError):
+            manager.reserve_enc("bob", "attempt-2")
+        manager.finish(key_id, "attempt-1", commit=False)
+        self.assertEqual(manager.reserve_enc("bob", "attempt-2")[0], key_id)
+        manager.finish(key_id, "attempt-2", commit=True)
+        self.assertEqual(manager.total_count(), 0)
+
+        manager.import_keys([("QK-TWO", b"b" * 32)])
+        with patch("qkd_demo.key_manager.RESERVATION_TTL_SECONDS", 0.001):
+            manager.reserve_enc("bob", "abandoned")
+            time.sleep(0.01)
+            self.assertEqual(manager.reserve_enc("bob", "after-expiry")[0], "QK-TWO")
+
     def test_key_sync_single_use_and_independent_pools(self):
         alice = KeyManager("alice", "bob")
         bob = KeyManager("bob", "alice")

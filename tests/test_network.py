@@ -13,7 +13,8 @@ from unittest.mock import patch
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from qkd_demo.coordinator import CoordinatorError, CoordinatorService
-from qkd_demo.protocol import TYPE_MESSAGE, TYPE_NACK, Frame, recv_frame, send_frame
+from qkd_demo.protocol import TYPE_MESSAGE, TYPE_NACK, TYPE_OUTCOME_QUERY, Frame, recv_frame, send_frame
+from qkd_demo.node import message_aad
 from support import NodeHarness, free_port
 
 
@@ -119,9 +120,109 @@ class NetworkTests(unittest.TestCase):
             send_frame(sock, Frame(TYPE_MESSAGE, key_id, nonce, bytes(ciphertext), "TAMPER", 1))
             response = recv_frame(sock)
         self.assertEqual(response.message_type, TYPE_NACK)
-        self.assertIn(b"Authentication failed", response.payload)
+        self.assertEqual(response.payload[:1], b"\x02")
         status, returned = http_call(self.bob.base_url + "/api/v1/keys/alice/dec_keys?" + urlencode({"key_ID": key_id}))
         self.assertEqual(status, 200)
+
+    def test_altered_message_metadata_fails_gcm_authentication(self):
+        self.generate(1)
+        _, allocated = http_call(self.alice.base_url + "/api/v1/keys/bob/enc_keys")
+        item = allocated["keys"][0]
+        key, key_id = base64.b64decode(item["key"]), item["key_ID"]
+        session, message_id, nonce, seq = "test-session", "original-id", b"z" * 12, 7
+        ciphertext = AESGCM(key).encrypt(nonce, b"metadata must authenticate",
+                                         message_aad(key_id, message_id, seq, session))
+        forged = Frame(TYPE_MESSAGE, key_id, nonce, ciphertext, "altered-id", seq, session)
+        with socket.create_connection(("127.0.0.1", self.bob.runtime.app_port), timeout=2) as sock:
+            sock.settimeout(2)
+            send_frame(sock, forged)
+            reply = recv_frame(sock)
+        self.assertEqual(reply.message_type, TYPE_NACK)
+        self.assertEqual(reply.payload[:1], b"\x02")
+
+    def test_same_frame_replay_is_rejected(self):
+        self.generate(1)
+        _, allocated = http_call(self.alice.base_url + "/api/v1/keys/bob/enc_keys")
+        item = allocated["keys"][0]
+        key, key_id = base64.b64decode(item["key"]), allocated["keys"][0]["key_ID"]
+        session, message_id, nonce, seq = "replay-session", "replay-id", b"r" * 12, 1
+        ciphertext = AESGCM(key).encrypt(nonce, b"once", message_aad(key_id, message_id, seq, session))
+        frame = Frame(TYPE_MESSAGE, key_id, nonce, ciphertext, message_id, seq, session)
+        replies = []
+        for _ in range(2):
+            with socket.create_connection(("127.0.0.1", self.bob.runtime.app_port), timeout=2) as sock:
+                sock.settimeout(2); send_frame(sock, frame); replies.append(recv_frame(sock))
+        self.assertEqual(replies[0].message_type, 2)
+        self.assertEqual(replies[1].message_type, TYPE_NACK)
+        self.assertIn(b"Replay", replies[1].payload)
+
+    def test_alice_restart_uses_new_session_and_can_send(self):
+        self.generate(2)
+        old_runtime = self.alice.runtime
+        manager = old_runtime.kme
+        bob_app = self.bob.runtime.app_port
+        self.alice.close()
+        self.alice = NodeHarness("alice", "127.0.0.1", bob_app)
+        self.alice.runtime.kme = manager
+        self.service.node_urls["alice"] = self.alice.base_url
+        self.assertEqual(self.service.send_message("after Alice restart")["status"], "delivered")
+
+    def test_lost_ack_queries_bob_and_keeps_pools_consistent(self):
+        self.generate(2)
+        bob_port = self.bob.runtime.app_port
+        class DropFirstAck(socketserver.BaseRequestHandler):
+            dropped = False
+            def handle(handler_self):
+                try:
+                    request = recv_frame(handler_self.request)
+                    with socket.create_connection(("127.0.0.1", bob_port), timeout=2) as remote:
+                        remote.settimeout(2); send_frame(remote, request); reply = recv_frame(remote)
+                    if request.message_type == TYPE_MESSAGE and not DropFirstAck.dropped:
+                        DropFirstAck.dropped = True
+                        return
+                    send_frame(handler_self.request, reply)
+                except (OSError, TimeoutError, ValueError):
+                    return
+        proxy = socketserver.ThreadingTCPServer(("127.0.0.1", 0), DropFirstAck)
+        proxy.daemon_threads = True
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True); thread.start()
+        try:
+            self.alice.runtime.peer_port = proxy.server_address[1]
+            first = self.alice.runtime.send_message("ACK dropped after commit")
+            self.assertEqual(first["status"], "delivered")
+            state = self.service.state()
+            self.assertEqual(state["pool_count"], state["bob_pool_count"])
+            second = self.alice.runtime.send_message("next message still works")
+            self.assertEqual(second["status"], "delivered")
+            state = self.service.state()
+            self.assertEqual(state["pool_count"], state["bob_pool_count"])
+        finally:
+            proxy.shutdown(); proxy.server_close(); thread.join(timeout=1)
+
+    def test_ack_hmac_mismatch_is_resolved_by_outcome_query(self):
+        self.generate(1)
+        bob_port = self.bob.runtime.app_port
+        class CorruptAck(socketserver.BaseRequestHandler):
+            corrupted = False
+            def handle(handler_self):
+                request = recv_frame(handler_self.request)
+                with socket.create_connection(("127.0.0.1", bob_port), timeout=2) as remote:
+                    remote.settimeout(2); send_frame(remote, request); reply = recv_frame(remote)
+                if request.message_type == TYPE_MESSAGE and not CorruptAck.corrupted:
+                    CorruptAck.corrupted = True
+                    reply = Frame(reply.message_type, reply.key_id, reply.nonce,
+                                  bytes([reply.payload[0]]) + bytes([reply.payload[1] ^ 1]) + reply.payload[2:],
+                                  reply.message_id, reply.sequence, reply.session_id)
+                send_frame(handler_self.request, reply)
+        proxy = socketserver.ThreadingTCPServer(("127.0.0.1", 0), CorruptAck)
+        proxy.daemon_threads = True
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True); thread.start()
+        try:
+            self.alice.runtime.peer_port = proxy.server_address[1]
+            self.assertEqual(self.alice.runtime.send_message("bad ack MAC")["status"], "delivered")
+            self.assertEqual(self.service.state()["pool_count"], self.service.state()["bob_pool_count"])
+        finally:
+            proxy.shutdown(); proxy.server_close(); thread.join(timeout=1)
 
     def test_link_down_blocks_tcp_messaging_and_restore_allows_it(self):
         self.generate(1)
@@ -162,7 +263,7 @@ class NetworkTests(unittest.TestCase):
         try:
             self.alice.runtime.peer_port = silent_server.server_address[1]
             self.alice.runtime.kme.import_keys([("QK-TIMEOUT", b"t" * 32)])
-            with self.assertRaisesRegex(RuntimeError, "unreachable"):
+            with self.assertRaisesRegex(RuntimeError, "unknown"):
                 self.alice.runtime.send_message("wait for timeout")
             self.assertEqual(self.alice.runtime.kme.status("bob")["stored_key_count"], 1)
         finally:

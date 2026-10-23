@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
 POOL_LIMIT = 24
 USED_ID_LIMIT = 4096
+RESERVATION_TTL_SECONDS = 30.0
 
 
 class KMEError(Exception):
@@ -21,6 +23,7 @@ class KeyRecord:
     key_id: str
     material: bytes
     reservation: str | None = None
+    reserved_at: float = 0.0
 
 
 class KeyManager:
@@ -66,9 +69,17 @@ class KeyManager:
         while len(self._used_ids) > USED_ID_LIMIT:
             self._used_ids.popitem(last=False)
 
+    def _expire_reservations(self) -> None:
+        cutoff = time.monotonic() - RESERVATION_TTL_SECONDS
+        for record in self._keys.values():
+            if record.reservation is not None and record.reserved_at < cutoff:
+                record.reservation = None
+                record.reserved_at = 0.0
+
     def status(self, peer_id: str) -> dict[str, object]:
         self._check_peer(peer_id)
         with self._lock:
+            self._expire_reservations()
             return {
                 "source_KME_ID": self.own_id,
                 "target_KME_ID": peer_id,
@@ -87,6 +98,7 @@ class KeyManager:
     def enc_key(self, peer_id: str) -> tuple[str, bytes]:
         self._check_peer(peer_id)
         with self._lock:
+            self._expire_reservations()
             for key_id, record in self._keys.items():
                 if record.reservation is not None:
                     continue
@@ -98,6 +110,7 @@ class KeyManager:
     def dec_key(self, peer_id: str, key_id: str) -> bytes:
         self._check_peer(peer_id)
         with self._lock:
+            self._expire_reservations()
             record = self._keys.get(key_id)
             if record is None:
                 if key_id in self._used_ids:
@@ -112,15 +125,18 @@ class KeyManager:
     def reserve_enc(self, peer_id: str, reservation: str) -> tuple[str, bytes]:
         self._check_peer(peer_id)
         with self._lock:
+            self._expire_reservations()
             for key_id, record in self._keys.items():
                 if record.reservation is None:
                     record.reservation = reservation
+                    record.reserved_at = time.monotonic()
                     return key_id, record.material
         raise KMEError(409, "No available key.")
 
     def reserve_dec(self, peer_id: str, key_id: str, reservation: str) -> bytes:
         self._check_peer(peer_id)
         with self._lock:
+            self._expire_reservations()
             record = self._keys.get(key_id)
             if record is None:
                 raise KMEError(409 if key_id in self._used_ids else 404,
@@ -128,10 +144,12 @@ class KeyManager:
             if record.reservation not in (None, reservation):
                 raise KMEError(409, "Key is reserved.")
             record.reservation = reservation
+            record.reserved_at = time.monotonic()
             return record.material
 
     def finish(self, key_id: str, reservation: str, *, commit: bool) -> None:
         with self._lock:
+            self._expire_reservations()
             record = self._keys.get(key_id)
             if record is None:
                 if key_id in self._used_ids and commit:
@@ -144,6 +162,7 @@ class KeyManager:
                 self._remember_used(key_id)
             else:
                 record.reservation = None
+                record.reserved_at = 0.0
 
     def discard(self, key_id: str) -> None:
         with self._lock:
