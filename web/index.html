@@ -4,20 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f5f7f4">
-  <title>QKD Network — Guided experiment</title>
+  <title>QKD Network</title>
   <link rel="stylesheet" href="/console.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="QKD Network home"><span class="brand-mark" aria-hidden="true">Q</span><span>QKD network experiment</span></a>
-      <div class="topbar-actions"><span class="local-label">Local classroom simulation</span><button id="refresh-state" class="quiet-button">Refresh status</button></div>
+      <a class="brand" href="/" aria-label="QKD Network home"><span class="brand-mark" aria-hidden="true">Q</span><span>QKD network</span></a>
+      <div class="topbar-actions"><span id="header-state" class="local-label">Connecting…</span><button id="refresh-state" class="quiet-button">Refresh status</button></div>
     </header>
 
     <main>
       <section class="intro" aria-labelledby="page-title">
-        <div><p class="eyebrow">A guided, simulated experiment</p><h1 id="page-title">Send a message using a shared secret</h1><p class="intro-copy">Create matching secret keys, send a message, and see whether the network accepted them.</p></div>
+        <div><h1 id="page-title">Send a message using a shared secret</h1><p class="intro-copy">Create matching secret keys, send a message, and see whether the network accepted them.</p></div>
         <button id="reset-demo" class="quiet-button reset-button">Reset experiment</button>
       </section>
 
@@ -27,7 +27,7 @@
 
       <section class="steps" aria-label="Three steps to try the experiment">
         <article class="step-card" id="step-one">
-          <div class="step-heading"><span class="step-number">1</span><div><h2>Create secret keys</h2><p>Alice and Bob get matching keys from the simulator.</p></div></div>
+          <div class="step-heading"><span class="step-number">1</span><div><h2>Create secret keys</h2></div></div>
           <div class="step-action"><button id="generate-keys" class="primary-button" disabled>Create keys</button><span id="key-action-reason" class="action-hint">Checking the network…</span></div>
           <p id="pool-summary" class="pool-summary">No keys created yet</p>
         </article>
@@ -52,7 +52,7 @@
 
       <section class="network-section" aria-labelledby="network-heading">
         <div class="section-heading"><div><p class="eyebrow">The route your message can take</p><h2 id="network-heading">Network map</h2></div><p id="last-path" class="last-path">No message sent yet</p></div>
-        <p class="section-intro">The simulator creates keys for each link. A relay helps pass the message along and can see the shared secret.</p>
+        <p class="section-intro">A relay helps pass the message along and can see the shared secret.</p>
         <div class="network-frame">
           <svg id="network-diagram" class="network-diagram" viewBox="0 0 640 260" role="img" aria-labelledby="diagram-title diagram-description" preserveAspectRatio="xMidYMid meet">
             <title id="diagram-title">Alice to Bob network routes</title><desc id="diagram-description">Two possible routes connect Alice to Bob through Relay 1 or Relay 2.</desc>
@@ -72,11 +72,14 @@
             <button type="button" class="preset-button" data-preset="distance">Long distance</button>
             <button type="button" class="preset-button" data-preset="noise">Noisy channel</button>
           </div>
-          <p id="settings-note" class="section-intro">Choose a preset or adjust the sliders, then save the settings. Relay links use their own settings from the topology file.</p>
+          <p id="settings-note" class="section-intro">Choose a link, then select a preset or adjust its settings before creating keys.</p>
+          <label id="link-setting-wrap" class="setting-link" for="link-setting">Which link?
+            <select id="link-setting"></select>
+          </label>
           <div class="setting-grid">
-            <label class="setting" for="distance"><span>Distance between nodes</span><output id="distance-output" for="distance">10 km</output><small>Longer simulated links can leave fewer matching signals.</small><input id="distance" type="range" min="1" max="50" value="10" step="1"></label>
+            <label class="setting" for="distance"><span>Distance between nodes</span><output id="distance-output" for="distance">10 km</output><input id="distance" type="range" min="1" max="50" value="10" step="1"></label>
             <label class="setting" for="noise"><span>Channel noise</span><output id="noise-output" for="noise">1%</output><small>Noise represents unwanted changes during transmission.</small><input id="noise" type="range" min="0" max="15" value="1" step="1"></label>
-            <label class="setting" for="eve"><span>Eavesdropper interception rate</span><output id="eve-output" for="eve">0%</output><small>How much of the simulated traffic Eve tries to observe.</small><input id="eve" type="range" min="0" max="100" value="0" step="5"></label>
+            <label class="setting" for="eve"><span>Eavesdropper interception rate</span><output id="eve-output" for="eve">0%</output><input id="eve" type="range" min="0" max="100" value="0" step="5"></label>
           </div>
           <button id="apply-settings" class="secondary-button">Save experiment settings</button>
         </div>
@@ -90,9 +93,9 @@
       <details class="disclosure glossary">
         <summary>What do these words mean?</summary>
         <div class="glossary-grid">
-          <p><span tabindex="0" title="Quantum key distribution">QKD</span> means quantum key distribution: a way to make matching secret keys using a quantum communication model.</p>
-          <p><span tabindex="0" title="BB84 is the named method simulated here">BB84</span> is the named method this project simulates to create and compare key bits.</p>
-          <p><span tabindex="0" title="Cascade helps correct bit disagreements">Cascade</span> is a simulator step that corrects disagreements between the two key strings.</p>
+          <p><span tabindex="0" title="Quantum key distribution">QKD</span> means quantum key distribution: a way to make matching secret keys.</p>
+          <p><span tabindex="0" title="BB84 is a method for creating and comparing key bits">BB84</span> is a method for creating and comparing key bits.</p>
+          <p><span tabindex="0" title="Cascade helps correct bit disagreements">Cascade</span> corrects disagreements between the two key strings.</p>
           <p><span tabindex="0" title="Quantum bit error rate">Error rate (QBER)</span> is the share of checked bits that disagree. A higher rate can come from noise or observation.</p>
           <p><span tabindex="0" title="Unused matching keys stored by a node">Key pool</span> is the store of unused secret keys at a node.</p>
           <p><span tabindex="0" title="A relay can see the key it passes along">Trusted relay</span> is a middle computer that helps pass a key along and can see it, so it must be trusted.</p>
@@ -105,7 +108,6 @@
         <div id="event-list" class="event-list" aria-live="polite"><p class="empty-note">Events will appear here as you use the experiment.</p></div>
       </section>
 
-      <footer class="footer"><span>Educational simulation · no quantum hardware</span><span>Do not use for real secrets or sensitive information.</span></footer>
     </main>
   </div>
 </body>

@@ -1,6 +1,8 @@
 import threading
 import unittest
 import os
+import json
+from urllib.request import Request, urlopen
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -68,6 +70,45 @@ class RelayNetworkTests(unittest.TestCase):
     def generate(self, count=1):
         with patch("qkd_demo.coordinator.run_sequence_bb84", side_effect=fake_experiment):
             return self.service.generate(count)
+
+    def update_link_settings(self, link_id, settings):
+        request = Request(self.coordinator_url + f"/api/links/{link_id}/settings",
+                          data=json.dumps(settings).encode(), method="POST",
+                          headers={"Content-Type": "application/json"})
+        with urlopen(request, timeout=3) as response:
+            return json.loads(response.read())
+
+    def test_link_settings_endpoint_affects_the_next_generation(self):
+        self.update_link_settings("A-R1", {
+            "distance_km": 31, "channel_noise": 0.07, "eve_fraction": 0.05
+        })
+        with patch("qkd_demo.coordinator.run_sequence_bb84", side_effect=fake_experiment) as run:
+            self.service.generate(1)
+        changed = run.call_args_list[0].args[0]
+        self.assertEqual(changed.distance_km, 31)
+        self.assertEqual(changed.channel_noise, 0.07)
+        self.assertEqual(changed.eve_fraction, 0.05)
+        state_link = next(link for link in self.service.state()["links"] if link["id"] == "A-R1")
+        self.assertEqual(state_link["distance_km"], 31)
+
+    def test_high_eve_rejects_keys_on_only_the_selected_link(self):
+        self.update_link_settings("A-R1", {
+            "distance_km": 8, "channel_noise": 0.01, "eve_fraction": 0.75
+        })
+
+        def eve_experiment(settings, *, seed=None):
+            result = fake_experiment(settings, seed=seed)
+            result["qber"] = 0.25 if settings.eve_fraction >= 0.1 else 0.02
+            return result
+
+        with patch("qkd_demo.coordinator.run_sequence_bb84", side_effect=eve_experiment):
+            generated = self.service.generate(1)
+        self.assertEqual(generated["generated"], 3)
+        links = {link["id"]: link for link in generated["state"]["links"]}
+        self.assertEqual(links["A-R1"]["pool_count"], 0)
+        self.assertEqual(links["A-R1"]["qber"], 0.25)
+        for link_id in ("R1-B", "A-R2", "R2-B"):
+            self.assertEqual(links[link_id]["pool_count"], 1)
 
     def test_key_transport_delivers_identical_end_to_end_key(self):
         self.generate()

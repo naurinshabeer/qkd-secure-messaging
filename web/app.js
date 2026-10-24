@@ -1,5 +1,6 @@
 const $ = id => document.getElementById(id);
 const QBER_LIMIT = 0.11;
+const GENERIC_ACTION_ERROR = 'The action did not finish. Check that the local coordinator and node processes are running, then refresh.';
 const PRESETS = {
   normal: {distance: 10, noise: 1, eve: 0, label: 'Normal'},
   eve: {distance: 10, noise: 1, eve: 75, label: 'Eavesdropper present'},
@@ -12,6 +13,8 @@ let inboxMessages = [];
 let lastDelivery = null;
 let statusOverride = '';
 let requestBusy = false;
+let selectedLinkId = '';
+let unexpectedError = '';
 
 async function request(path, body) {
   let response;
@@ -57,7 +60,7 @@ function helpfulError(error) {
   if (text.includes('no available key') || text.includes('pool is empty') || text.includes('key pool is empty')) return 'There are no keys available on this link. Create more keys, or use another open route.';
   if (text.includes('unknown peer_id') || text.includes('unknown key') || text.includes('key not found')) return 'The requested node or key could not be found. Refresh the network state, then create a new key if needed.';
   if (text.includes('already reserved') || text.includes('already consumed') || text.includes('reservation')) return 'That one-time key is already in use or has been used. Refresh the page and try with an available key.';
-  if (text.includes('link is down') || text.includes('link down') || text.includes('link is unavailable') || text.includes('simulated link is down')) return 'This link is down. Restore it or send the message through another open route.';
+  if (text.includes('link is down') || text.includes('link down') || text.includes('link is unavailable')) return 'This link is down. Restore it or send the message through another open route.';
   if (text.includes('rejected the message')) return 'Bob could not verify the message. The reserved key was released; try sending again.';
   if (text.includes('outcome is unknown')) return 'Delivery could not be confirmed. The key is held safely while the nodes reconcile; refresh status before trying again.';
   if (text.includes('unknown topology link')) return 'That link is not in the loaded network map. Refresh the dashboard to reload its links.';
@@ -146,6 +149,26 @@ function renderNetwork(state) {
     up: state.link_up, a_pool: state.pool_count, b_pool: state.bob_pool_count,
     pool_count: Math.min(state.pool_count, state.bob_pool_count), qber: state.last_run?.qber ?? null
   }];
+  $('link-setting-wrap').hidden = !state.topology;
+  if (state.topology) {
+    const select = $('link-setting');
+    select.innerHTML = links.map(link => `<option value="${escapeHtml(link.id)}">${escapeHtml(displayName(link.a))}–${escapeHtml(displayName(link.b))}</option>`).join('');
+    const firstRelayLink = links.find(link =>
+      [link.a, link.b].some(node => node.toLowerCase() === 'alice') &&
+      [link.a, link.b].some(node => node.toLowerCase() === 'r1'));
+    const selected = links.some(link => link.id === selectedLinkId)
+      ? selectedLinkId
+      : (firstRelayLink || links.find(link => link.a.toLowerCase() === 'alice' || link.b.toLowerCase() === 'alice') || links[0])?.id;
+    selectedLinkId = selected || '';
+    select.value = selectedLinkId;
+    const link = links.find(item => item.id === selectedLinkId);
+    if (link) {
+      $('distance').value = link.distance_km;
+      $('noise').value = Math.round(Number(link.noise) * 100);
+      $('eve').value = Math.round(Number(link.eve) * 100);
+      formatSettings();
+    }
+  }
   const nodes = [...new Set(links.flatMap(link => [link.a, link.b]))];
   const relays = nodes.filter(node => !['alice', 'bob'].includes(node.toLowerCase())).sort();
   const coords = {};
@@ -190,7 +213,7 @@ function renderNetwork(state) {
     const buttonText = link.up ? 'Fail link' : 'Restore link';
     return `<article class="link-card ${link.up ? 'link-up' : 'link-down'}">
       <div class="link-card-heading"><h3>${escapeHtml(displayName(link.a))}–${escapeHtml(displayName(link.b))}</h3><span class="link-status">${upLabel}</span></div>
-      <div class="link-facts"><span><b>Distance</b>${Number(link.distance_km).toLocaleString()} km</span><span><b>Available keys</b>${Number(link.pool_count || 0).toLocaleString()}</span><span><b>Error check</b>${escapeHtml(qber)}</span></div>
+      <div class="link-facts"><span><b>Distance · noise · Eve</b>${Number(link.distance_km).toLocaleString()} km · ${percent(link.noise)} · ${percent(link.eve)}</span><span><b>Available keys</b>${Number(link.pool_count || 0).toLocaleString()}</span><span><b>Error check</b>${escapeHtml(qber)}</span></div>
       <button type="button" class="link-control ${link.up ? 'fail-control' : ''}" data-link-id="${escapeHtml(link.id)}" data-action="${action}">${buttonText}</button>
     </article>`;
   }).join('');
@@ -212,11 +235,11 @@ function renderResult(state) {
   if (!state.topology && state.last_run) {
     const run = state.last_run;
     if (run.accepted) {
-      sentence.textContent = `The simulator did not detect an error above the 11% limit: the error rate was ${percent(run.qber)}. ${Number(run.pool_added)} matching key${run.pool_added === 1 ? '' : 's'} were accepted and can be used once each.`;
+      sentence.textContent = `The error rate was ${percent(run.qber)}. ${Number(run.pool_added)} matching key${run.pool_added === 1 ? '' : 's'} were accepted and can be used once each.`;
     } else if (Number(run.qber) >= Number(state.qber_limit || QBER_LIMIT)) {
-      sentence.textContent = `The simulator detected a suspicious error rate of ${percent(run.qber)}, at or above the 11% limit, so these keys were rejected and not used.`;
+      sentence.textContent = `The error rate was ${percent(run.qber)}, at or above the 11% limit, so these keys were rejected and not used.`;
     } else {
-      sentence.textContent = 'The error check was below the limit, but the simulator did not produce a matching key to use.';
+      sentence.textContent = 'The error check was below the limit, but no matching key was produced.';
     }
     return;
   }
@@ -279,6 +302,7 @@ function renderAdvanced(state) {
     values.push(['Key ID', lastDelivery.key_id || '—']);
     values.push(['Encrypted payload length', `${lastDelivery.ciphertext_bytes} bytes`]);
   }
+  if (unexpectedError) values.push(['Unexpected error', unexpectedError]);
   $('advanced-content').innerHTML = values.map(([label, value]) => {
     const idValue = /\bID(s)?\b/.test(label);
     return `<div class="advanced-item"><span>${escapeHtml(label)}</span><span class="${idValue ? 'technical-id' : ''}">${escapeHtml(value)}</span></div>`;
@@ -350,6 +374,12 @@ async function runAction(action, successMessage) {
     return result;
   } catch (error) {
     statusOverride = helpfulError(error);
+    if (statusOverride === GENERIC_ACTION_ERROR) {
+      unexpectedError = String(error?.message || error);
+      console.error(error);
+      if (currentState) renderAdvanced(currentState);
+      $('advanced-details').open = true;
+    }
     say(statusOverride, 'error');
     return null;
   } finally {
@@ -361,7 +391,7 @@ async function runAction(action, successMessage) {
 async function generateKeys() {
   lastDelivery = null;
   await runAction(async () => request('/api/keys/generate', {count: 24}), result =>
-    result.generated ? `Created ${result.generated} matching key${result.generated === 1 ? '' : 's'}. You can now send a message.` : 'The simulation did not produce any accepted keys. Check the error rate and try a different experiment.');
+    result.generated ? `Created ${result.generated} matching key${result.generated === 1 ? '' : 's'}. You can now send a message.` : 'No keys were accepted. Check the error rate and try different settings.');
 }
 
 async function sendMessage() {
@@ -413,13 +443,26 @@ async function saveSettings(presetName = '') {
     channel_noise: Number($('noise').value) / 100,
     eve_fraction: Number($('eve').value) / 100
   };
-  const result = await runAction(() => request('/api/settings', settings), () => {
+  const endpoint = currentState?.topology
+    ? `/api/links/${encodeURIComponent(selectedLinkId)}/settings`
+    : '/api/settings';
+  const result = await runAction(() => request(endpoint, settings), () => {
     const prefix = presetName ? `${presetName} preset saved.` : 'Experiment settings saved.';
     return currentState?.topology
-      ? `${prefix} Relay links still use their individual values from the topology file.`
+      ? `${prefix} ${displayName(selectedLinkId)} will use them the next time keys are created.`
       : `${prefix} They will be used the next time you create keys.`;
   });
   if (result) $('customize-section').open = true;
+}
+
+function loadSelectedLinkSettings() {
+  selectedLinkId = $('link-setting').value;
+  const link = currentState?.links?.find(item => item.id === selectedLinkId);
+  if (!link) return;
+  $('distance').value = link.distance_km;
+  $('noise').value = Math.round(Number(link.noise) * 100);
+  $('eve').value = Math.round(Number(link.eve) * 100);
+  formatSettings();
 }
 
 function setPreset(name) {
@@ -441,6 +484,7 @@ $('generate-keys').addEventListener('click', generateKeys);
 $('send-message').addEventListener('click', sendMessage);
 $('message').addEventListener('input', updateCharCount);
 $('apply-settings').addEventListener('click', () => saveSettings());
+$('link-setting').addEventListener('change', loadSelectedLinkSettings);
 ['distance', 'noise', 'eve'].forEach(id => $(id).addEventListener('input', formatSettings));
 document.querySelectorAll('[data-preset]').forEach(button => button.addEventListener('click', () => setPreset(button.dataset.preset)));
 $('link-list').addEventListener('click', event => {

@@ -10,7 +10,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse, urlsplit
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
 from qkd_demo.node import json_request
 from qkd_demo.sequence_link import LinkSettings, run_sequence_bb84
@@ -125,11 +125,19 @@ class CoordinatorService:
             raise CoordinatorError(status, f"{role.title()} node unavailable: {text}") from exc
 
     def set_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        settings = self._validated_settings(payload, self.settings)
+        with self._lock:
+            self.settings = settings
+            self._event("Next link run settings updated", "info")
+            return self.state()
+
+    @staticmethod
+    def _validated_settings(payload: dict[str, Any], current: LinkSettings) -> LinkSettings:
         try:
             settings = LinkSettings(
-                float(payload.get("distance_km", self.settings.distance_km)),
-                float(payload.get("eve_fraction", self.settings.eve_fraction)),
-                float(payload.get("channel_noise", self.settings.channel_noise)),
+                float(payload.get("distance_km", current.distance_km)),
+                float(payload.get("eve_fraction", current.eve_fraction)),
+                float(payload.get("channel_noise", current.channel_noise)),
             )
             # Validate without paying for a simulator run.
             if not 1 <= settings.distance_km <= 50:
@@ -140,9 +148,16 @@ class CoordinatorService:
                 raise ValueError("Channel noise must be between 0 and 0.15.")
         except (TypeError, OverflowError) as exc:
             raise ValueError("Settings must be numeric.") from exc
+
+        return settings
+
+    def set_link_settings(self, link_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if link_id not in self.link_settings:
+            raise CoordinatorError(404, "Unknown topology link.")
+        settings = self._validated_settings(payload, self.link_settings[link_id])
         with self._lock:
-            self.settings = settings
-            self._event("Next simulated link run settings updated", "info")
+            self.link_settings[link_id] = settings
+            self._event(f"{link_id} settings updated", "info")
             return self.state()
 
     def generate(self, requested_count: int = POOL_LIMIT) -> dict[str, Any]:
@@ -267,7 +282,7 @@ class CoordinatorService:
                                   self._node(b, "/api/node/keys?peer_id=" + a)["count"])
                               for a, b in zip(path, path[1:])]
                     if all(counts):
-                        candidates.append((sum(float(link["distance_km"]) for link in links), path, links))
+                        candidates.append((sum(self.link_settings[link["id"]].distance_km for link in links), path, links))
             if not candidates:
                 self.blocked_count += 1
                 raise CoordinatorError(503, "Both Alice-to-Bob relay paths are unavailable (link down or empty pool).")
@@ -333,8 +348,9 @@ class CoordinatorService:
                         left_count = right_count = 0
                     metrics = self.link_results.get(link_id, {})
                     rendered.append({"id": link_id, "a": left, "b": right,
-                        "distance_km": float(link["distance_km"]), "noise": float(link.get("noise", 0.01)),
-                        "eve": float(link.get("eve", 0.0)), "up": self.link_state.get(link_id),
+                        "distance_km": self.link_settings[link_id].distance_km,
+                        "noise": self.link_settings[link_id].channel_noise,
+                        "eve": self.link_settings[link_id].eve_fraction, "up": self.link_state.get(link_id),
                         "a_pool": left_count, "b_pool": right_count,
                         "pool_count": min(left_count, right_count), "qber": metrics.get("qber")})
                 return {"topology": True, "links": rendered, "paths": self.paths,
@@ -447,6 +463,9 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == "/api/settings":
                 result = service.set_settings(payload)
+            elif path.startswith("/api/links/") and path.endswith("/settings"):
+                link_id = unquote(urlparse(self.path).path.split("/")[3])
+                result = service.set_link_settings(link_id, payload)
             elif path == "/api/keys/generate":
                 result = service.generate(payload.get("count", POOL_LIMIT))
             elif path == "/api/messages":
