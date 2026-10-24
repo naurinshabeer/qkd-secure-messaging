@@ -29,6 +29,11 @@ class CompareKeyEstablishmentTests(unittest.TestCase):
             signed = mitm_rows["Ed25519-signed X25519 MITM"]
             self.assertEqual(signed["handshake_result"], "aborted")
             self.assertIn("FAILED", signed["signature_verification"])
+            for field in ("platform", "python_version", "cryptography_version",
+                          "cpu_count", "repetitions", "generated_utc"):
+                self.assertTrue(unauthenticated[field], field)
+            self.assertEqual(unauthenticated["repetitions"], "2")
+            self.assertTrue(unauthenticated["generated_utc"].endswith("Z"))
             self.assertGreater(png_path.stat().st_size, 0)
 
 

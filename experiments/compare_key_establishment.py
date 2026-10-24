@@ -5,11 +5,16 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib
+import os
+import platform
 import statistics
+import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import cryptography
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa, x25519
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -22,7 +27,9 @@ CSV_FIELDS = [
     "median_ms", "p95_ms", "bytes_on_wire", "public_key_bytes",
     "ciphertext_bytes", "signals_per_accepted_key_bit", "qber",
     "acceptance_rate", "alice_matches_bob", "alice_matches_eve",
-    "bob_matches_eve", "signature_verification", "handshake_result", "note",
+    "bob_matches_eve", "signature_verification", "handshake_result",
+    "platform", "python_version", "cryptography_version", "cpu_count",
+    "repetitions", "generated_utc", "note",
 ]
 RSA_KEYGEN_REPETITIONS = 100
 RSA_BITS = 2048
@@ -387,6 +394,16 @@ def run_comparison(repetitions: int, result_dir: Path, output_dir: Path) -> tupl
     rows.extend(_mlkem_rows(repetitions))
     rows.extend(_bb84_rows(summary))
     rows.extend(_mitm_rows())
+    provenance = {
+        "platform": platform.platform(),
+        "python_version": sys.version.split()[0],
+        "cryptography_version": cryptography.__version__,
+        "cpu_count": os.cpu_count(),
+        "repetitions": repetitions,
+        "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+    for row in rows:
+        row.update(provenance)
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "compare_key_establishment.csv"
     png_path = output_dir / "compare_key_establishment.png"

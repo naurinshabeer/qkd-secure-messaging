@@ -33,12 +33,14 @@ Classical operation results (per operation unless noted):
 
 | Method | Repetitions | Median (ms) | p95 (ms) | Bytes on wire | Public key (bytes) | Ciphertext (bytes) |
 |---|---:|---:|---:|---:|---:|---:|
-| X25519 + HKDF, both sides | 1,000 | 0.326 | 0.445 | 64 | 32 per side | — |
-| RSA-2048 key generation | 100 | 75.103 | 186.435 | 0 | — | — |
-| RSA-2048 OAEP encrypt | 1,000 | 0.035 | 0.037 | 256 | 294 (DER SPKI) | 256 |
-| RSA-2048 OAEP decrypt | 1,000 | 0.772 | 1.926 | 256 | 294 (DER SPKI) | 256 |
-| Pre-shared key + HKDF, both sides | 1,000 | 0.011 | 0.012 | 0 | — | — |
+| X25519 + HKDF, both sides | 1,000 | 0.137 | 0.145 | 64 | 32 per side | — |
+| RSA-2048 key generation | 100 | 47.075 | 192.438 | 0 | — | — |
+| RSA-2048 OAEP encrypt | 1,000 | 0.041 | 0.047 | 256 | 294 (DER SPKI) | 256 |
+| RSA-2048 OAEP decrypt | 1,000 | 0.887 | 1.140 | 256 | 294 (DER SPKI) | 256 |
+| Pre-shared key + HKDF, both sides | 1,000 | 0.015 | 0.015 | 0 | — | — |
 | ML-KEM | Not measured here | — | — | — | — | — |
+
+Provenance for these measured results: **platform** Windows-11-10.0.26200-SP0; **Python** 3.12.4; **cryptography** 47.0.0; **CPU count** 20; **repetitions** 1,000 for operations and 100 for RSA key generation; **UTC timestamp** 2026-10-24T13:40:35Z. The CSV repeats these metadata fields on every row.
 
 BB84 distance pilot (simulated; **2 runs per point**):
 
