@@ -253,12 +253,28 @@ def _plot(rows: list[dict[str, Any]], output: Path) -> None:
     distance = [row for row in rows if row["category"] == "bb84_simulated" and row["parameter"] == "distance_km"]
     eve = [row for row in rows if row["category"] == "bb84_simulated" and row["parameter"] == "eve_fraction"]
     fig, axes = plt.subplots(2, 2, figsize=(14, 9), constrained_layout=True)
-    labels = [row["method"].replace(" (both sides)", "") for row in classical]
-    medians = [float(row["median_ms"]) for row in classical]
-    p95s = [float(row["p95_ms"]) for row in classical]
-    axes[0, 0].barh(labels, medians, color="#417b6a")
-    axes[0, 0].set_title("Classical operation timing · measured here", fontsize=12)
-    axes[0, 0].set_xlabel("Median milliseconds (p95 shown in CSV)")
+    operation_rows = [row for row in classical if row["method"] != "RSA-2048 key generation"]
+    setup_rows = [row for row in classical if row["method"] == "RSA-2048 key generation"]
+    timing_rows = operation_rows + setup_rows
+    labels = [row["method"].replace(" (both sides)", "") for row in timing_rows]
+    medians = [float(row["median_ms"]) for row in timing_rows]
+    p95s = [float(row["p95_ms"]) for row in timing_rows]
+    positions = list(range(len(timing_rows)))
+    colors = ["#417b6a"] * len(operation_rows) + ["#c28a3e"] * len(setup_rows)
+    axes[0, 0].barh(positions, medians, color=colors)
+    axes[0, 0].scatter(p95s, positions, marker="D", color="#273b35", zorder=3, label="p95")
+    for y, median in zip(positions, medians):
+        axes[0, 0].annotate(f"{median:.3g}", (median, y), xytext=(4, 0),
+                            textcoords="offset points", va="center", fontsize=8)
+    axes[0, 0].set_yticks(positions, labels)
+    axes[0, 0].invert_yaxis()
+    if setup_rows:
+        axes[0, 0].axhline(len(operation_rows) - .5, color="#777777", linestyle=":", linewidth=1)
+        axes[0, 0].text(.02, .02, "RSA key generation: one-time setup", transform=axes[0, 0].transAxes,
+                        fontsize=8, va="bottom", color="#73501e")
+    axes[0, 0].set_xscale("log")
+    axes[0, 0].set_title("Classical timing · log scale; key generation is setup", fontsize=12)
+    axes[0, 0].set_xlabel("Milliseconds (bar = median with value; diamond = p95)")
     axes[0, 0].grid(axis="x", alpha=.2)
 
     byte_rows = [row for row in classical if row["bytes_on_wire"] != ""]
