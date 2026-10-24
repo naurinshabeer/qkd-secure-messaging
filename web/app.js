@@ -117,7 +117,7 @@ function stateMessage(state) {
   if (usablePaths.length && state.links.some(link => !link.up)) {
     const route = usablePaths.sort((left, right) => pathDistance(state, left) - pathDistance(state, right))[0];
     const failed = state.links.find(link => !link.up);
-    return `Link ${displayName(failed.a)}–${displayName(failed.b)} is down. Messages can use ${route.slice(1, -1).map(displayName).join(' or ')}.`;
+    return `Link ${displayName(failed.a)}–${displayName(failed.b)} is down. Messages can use ${route.map(displayName).join(' → ')}.`;
   }
   if (!state.links.some(link => link.pool_count > 0 && link.up)) return 'The network is connected, but no link has keys yet. Create keys to begin.';
   if (!usablePaths.length) {
@@ -133,7 +133,6 @@ function stateOverride() { return Boolean(statusOverride); }
 function render(state) {
   currentState = state;
   currentInboxUrl = state.bob_inbox_url || '';
-  $('header-state').textContent = state.topology ? 'Four-link relay network' : 'Alice and Bob network';
   if (!statusOverride) say(stateMessage(state));
   renderNetwork(state);
   renderResult(state);
@@ -170,32 +169,138 @@ function renderNetwork(state) {
     }
   }
   const nodes = [...new Set(links.flatMap(link => [link.a, link.b]))];
-  const relays = nodes.filter(node => !['alice', 'bob'].includes(node.toLowerCase())).sort();
-  const coords = {};
-  nodes.forEach(node => {
-    if (node.toLowerCase() === 'alice') coords[node] = {x: 66, y: 130};
-    else if (node.toLowerCase() === 'bob') coords[node] = {x: 574, y: 130};
-    else {
-      const index = relays.indexOf(node);
-      const y = relays.length === 1 ? 130 : 62 + index * (136 / Math.max(1, relays.length - 1));
-      coords[node] = {x: 320, y};
+  const alice = nodes.find(node => node.toLowerCase() === 'alice') || nodes[0];
+  const bob = nodes.find(node => node.toLowerCase() === 'bob') || nodes[nodes.length - 1];
+  const hops = new Map([[alice, 0]]), queue = [alice];
+  while (queue.length) {
+    const node = queue.shift();
+    for (const link of links) {
+      const next = link.a === node ? link.b : link.b === node ? link.a : null;
+      if (next !== null && !hops.has(next)) { hops.set(next, hops.get(node) + 1); queue.push(next); }
     }
+  }
+  const relays = nodes.filter(node => node !== alice && node !== bob);
+  const maxHop = Math.max(1, ...relays.map(node => hops.get(node) || 1));
+  const layers = [...new Set(relays.map(node => hops.get(node) || maxHop))].sort((a, b) => a - b);
+  const columns = layers.map(layer => relays.filter(node => (hops.get(node) || maxHop) === layer)
+    .sort((a, b) => displayName(a).localeCompare(displayName(b))));
+  const busiestColumn = Math.max(1, ...columns.map(column => column.length));
+  const width = Math.max(640, 510 + 130 * maxHop);
+  const height = Math.max(260, 120 + 100 * (busiestColumn - 1));
+  const marginX = 70;
+  const coords = {[alice]: {x: marginX, y: height / 2}, [bob]: {x: width - marginX, y: height / 2}};
+  columns.forEach((column, columnIndex) => {
+    const x = marginX + (width - 2 * marginX) * layers[columnIndex] / (maxHop + 1);
+    column.forEach((node, index) => {
+      coords[node] = {x, y: column.length === 1 ? height / 2 : 60 + index * (height - 120) / (column.length - 1)};
+    });
   });
+  $('network-diagram').setAttribute('viewBox', `0 0 ${width} ${height}`);
+  const routeCount = state.topology ? (state.paths || []).length : 1;
+  const summary = `${nodes.length} nodes · ${links.length} links · ${routeCount} route${routeCount === 1 ? '' : 's'}`;
+  $('header-state').textContent = state.topology ? summary : 'Alice and Bob network';
+  $('diagram-title').textContent = `${nodes.length}-node network · ${links.length} links · ${routeCount} route${routeCount === 1 ? '' : 's'}`;
+  $('diagram-description').textContent = `A network diagram with ${nodes.length} nodes and ${links.length} links. ${routeCount} route${routeCount === 1 ? '' : 's'} connect ${displayName(alice)} to ${displayName(bob)}.`;
+
+  const bounds = point => ({left: point.x - 48, right: point.x + 48, top: point.y - 22, bottom: point.y + 22});
+  const clip = (center, toward) => {
+    const dx = toward.x - center.x, dy = toward.y - center.y;
+    const scale = Math.min(dx ? 48 / Math.abs(dx) : Infinity, dy ? 22 / Math.abs(dy) : Infinity);
+    return {x: center.x + dx * scale, y: center.y + dy * scale};
+  };
+  const curve = (from, to, offset, samples = 32) => {
+    const dx = to.x - from.x, dy = to.y - from.y, length = Math.hypot(dx, dy) || 1;
+    const control = {x: (from.x + to.x) / 2 - dy / length * offset,
+      y: (from.y + to.y) / 2 + dx / length * offset};
+    const start = clip(from, control), end = clip(to, control);
+    return Array.from({length: samples + 1}, (_, i) => {
+      const t = i / samples, u = 1 - t;
+      return {x: u * u * start.x + 2 * u * t * control.x + t * t * end.x,
+        y: u * u * start.y + 2 * u * t * control.y + t * t * end.y};
+    });
+  };
+  const hitsBox = (a, b, box) => {
+    let low = 0, high = 1;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    for (const [p, q] of [[-dx, a.x - box.left + 4], [dx, box.right + 4 - a.x],
+      [-dy, a.y - box.top + 4], [dy, box.bottom + 4 - a.y]]) {
+      if (!p) { if (q < 0) return false; continue; }
+      const t = q / p;
+      if (p < 0) low = Math.max(low, t); else high = Math.min(high, t);
+      if (low > high) return false;
+    }
+    return true;
+  };
+  const overlaps = (a, b, c, d) => {
+    const ux = b.x - a.x, uy = b.y - a.y, vx = d.x - c.x, vy = d.y - c.y;
+    const length = Math.hypot(ux, uy) || 1, otherLength = Math.hypot(vx, vy) || 1;
+    if (Math.abs(ux * vy - uy * vx) / (length * otherLength) > .04) return false;
+    if (Math.abs(ux * (c.y - a.y) - uy * (c.x - a.x)) / length > 7) return false;
+    const first = [0, length];
+    const second = [((c.x - a.x) * ux + (c.y - a.y) * uy) / length,
+      ((d.x - a.x) * ux + (d.y - a.y) * uy) / length].sort((x, y) => x - y);
+    return Math.min(first[1], second[1]) - Math.max(first[0], second[0]) > 5;
+  };
+  const drawn = [];
+  const clear = (points, link) => points.slice(1).every((point, index) => {
+    const priorPoint = points[index];
+    if (nodes.some(node => node !== link.a && node !== link.b && hitsBox(priorPoint, point, bounds(coords[node])))) return false;
+    return drawn.every(prior => {
+      return prior.points.slice(1).every((otherPoint, otherIndex) =>
+        !overlaps(priorPoint, point, prior.points[otherIndex], otherPoint));
+    });
+  });
+  const edgePoints = link => {
+    const from = coords[link.a], to = coords[link.b];
+    const direct = [clip(from, to), clip(to, from)];
+    if (clear(direct, link)) return direct;
+    for (let offset = 28; offset <= Math.max(width, height) * 2; offset += 28) {
+      for (const sign of [1, -1]) {
+        const bent = curve(from, to, offset * sign);
+        if (clear(bent, link)) return bent;
+      }
+    }
+    return curve(from, to, Math.max(width, height) * 2);
+  };
+  const middle = points => {
+    const lengths = points.slice(1).map((point, i) => Math.hypot(point.x - points[i].x, point.y - points[i].y));
+    let distance = lengths.reduce((sum, value) => sum + value, 0) / 2;
+    for (let i = 0; i < lengths.length; i++) {
+      if (distance <= lengths[i]) {
+        const t = lengths[i] ? distance / lengths[i] : 0;
+        return {x: points[i].x + (points[i + 1].x - points[i].x) * t,
+          y: points[i].y + (points[i + 1].y - points[i].y) * t};
+      }
+      distance -= lengths[i];
+    }
+    return points[0];
+  };
   const used = new Set();
   if (state.topology && state.last_path) {
     state.last_path.slice(0, -1).forEach((node, index) => used.add(pairId(node, state.last_path[index + 1])));
   }
   $('diagram-links').innerHTML = links.map(link => {
-    const from = coords[link.a], to = coords[link.b];
+    const points = edgePoints(link);
+    drawn.push({link, points});
+    const path = points.map(point => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' L ');
     const active = used.has(pairId(link.a, link.b));
-    const middleX = (from.x + to.x) / 2;
-    const middleY = (from.y + to.y) / 2;
+    const dot = middle(points);
     return `<g class="edge-group ${link.up ? 'is-up' : 'is-down'} ${active ? 'path-used' : ''}">
-      <line class="diagram-edge" x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}"></line>
-      <circle class="edge-dot" cx="${middleX}" cy="${middleY}" r="5"></circle>
-      ${active ? `<circle class="path-pulse" cx="${middleX}" cy="${middleY}" r="10"></circle>` : ''}
+      <path class="diagram-edge" d="M ${path}"></path>
+      <circle class="edge-dot" cx="${dot.x.toFixed(1)}" cy="${dot.y.toFixed(1)}" r="5"></circle>
+      ${active ? `<circle class="path-pulse" cx="${dot.x.toFixed(1)}" cy="${dot.y.toFixed(1)}" r="10"></circle>` : ''}
     </g>`;
   }).join('');
+  const pointsInView = [...drawn.flatMap(edge => edge.points),
+    ...nodes.flatMap(node => {
+      const box = bounds(coords[node]);
+      return [{x: box.left, y: box.top}, {x: box.right, y: box.bottom}];
+    })];
+  const minX = Math.min(0, ...pointsInView.map(point => point.x - 18));
+  const minY = Math.min(0, ...pointsInView.map(point => point.y - 18));
+  const maxX = Math.max(width, ...pointsInView.map(point => point.x + 18));
+  const maxY = Math.max(height, ...pointsInView.map(point => point.y + 18));
+  $('network-diagram').setAttribute('viewBox', `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
   $('diagram-nodes').innerHTML = nodes.map(node => {
     const point = coords[node];
     return `<g class="diagram-node"><rect x="${point.x - 48}" y="${point.y - 22}" width="96" height="44" rx="14"></rect><text x="${point.x}" y="${point.y + 5}" text-anchor="middle">${escapeHtml(displayName(node))}</text></g>`;

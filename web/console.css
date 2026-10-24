@@ -80,8 +80,8 @@ textarea::placeholder { color: #829086; }
 .last-path { margin: 0 0 2px; color: var(--green); font-size: 14px; font-weight: 700; text-align: right; }
 .section-intro { margin: 6px 0 15px; color: var(--muted); font-size: 14px; }
 .network-frame { padding: 6px 12px; border: 1px solid var(--line); border-radius: 13px; background: #f7faf7; }
-.network-diagram { display: block; width: 100%; height: auto; max-height: 340px; }
-.diagram-edge { stroke: #91a398; stroke-width: 5; stroke-linecap: round; }
+.network-diagram { display: block; width: 100%; height: auto; }
+.diagram-edge { stroke: #91a398; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
 .is-down .diagram-edge { stroke: #c7776c; stroke-dasharray: 8 9; }
 .edge-dot { fill: #60856d; stroke: #fff; stroke-width: 2; }
 .is-down .edge-dot { fill: #a7473c; }
