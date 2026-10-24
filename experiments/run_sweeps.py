@@ -28,16 +28,18 @@ KEY_BITS = 256
 RUN_COLUMNS = [
     "sweep", "parameter", "parameter_value", "seed", "qber", "accepted",
     "raw_key_length_bits", "sifted_key_length_bits", "final_key_length_bits",
-    "accepted_key_yield_bits", "run_time_s", "signals_sent", "signals_intercepted",
+    "accepted_final_key_bits", "key_efficiency_bits_per_signal", "signals_per_key_bit",
+    "run_time_s", "signals_sent", "signals_intercepted",
     "qber_samples", "cascade_keys_generated", "matching_cascade_keys",
 ]
 SUMMARY_COLUMNS = [
-    "sweep", "parameter", "parameter_value", "runs", "acceptance_rate",
+    "sweep", "parameter", "parameter_value", "runs",
+    "acceptance_rate_mean", "acceptance_rate_std", "acceptance_rate_ci95_low", "acceptance_rate_ci95_high",
     "qber_mean", "qber_std", "qber_ci95_low", "qber_ci95_high",
-    "accepted_key_yield_bits_mean", "accepted_key_yield_bits_std",
-    "accepted_key_yield_bits_ci95_low", "accepted_key_yield_bits_ci95_high",
-    "key_rate_bits_per_second_mean", "key_rate_bits_per_second_std",
-    "key_rate_bits_per_second_ci95_low", "key_rate_bits_per_second_ci95_high",
+    "key_efficiency_bits_per_signal_mean", "key_efficiency_bits_per_signal_std",
+    "key_efficiency_bits_per_signal_ci95_low", "key_efficiency_bits_per_signal_ci95_high",
+    "signals_per_key_bit_mean", "signals_per_key_bit_std",
+    "signals_per_key_bit_ci95_low", "signals_per_key_bit_ci95_high",
     "run_time_s_mean",
 ]
 
@@ -75,6 +77,9 @@ def run_sweeps(seeds: int, out_dir: Path, *, quick: bool = False) -> tuple[Path,
                 matching_count = int(result.get("matching_cascade_keys", 0))
                 accepted = bool(result.get("accepted", False) and float(result["qber"]) < QBER_LIMIT)
                 final_bits = matching_count * KEY_BITS
+                signals_sent = int(result.get("signals_sent", 0))
+                accepted_bits = final_bits if accepted else 0
+                efficiency = accepted_bits / signals_sent if signals_sent else 0.0
                 row = {
                     "sweep": sweep,
                     "parameter": parameter,
@@ -86,9 +91,12 @@ def run_sweeps(seeds: int, out_dir: Path, *, quick: bool = False) -> tuple[Path,
                     "raw_key_length_bits": "",
                     "sifted_key_length_bits": "",
                     "final_key_length_bits": final_bits,
-                    "accepted_key_yield_bits": final_bits if accepted else 0,
+                    "accepted_final_key_bits": accepted_bits,
+                    "key_efficiency_bits_per_signal": efficiency,
+                    # Undefined when no key bits are accepted; CSV keeps this empty.
+                    "signals_per_key_bit": signals_sent / accepted_bits if accepted_bits else "",
                     "run_time_s": elapsed,
-                    "signals_sent": int(result.get("signals_sent", 0)),
+                    "signals_sent": signals_sent,
                     "signals_intercepted": int(result.get("signals_intercepted", 0)),
                     "qber_samples": int(result.get("qber_samples", 0)),
                     "cascade_keys_generated": int(result.get("cascade_keys_generated", 0)),
@@ -98,27 +106,26 @@ def run_sweeps(seeds: int, out_dir: Path, *, quick: bool = False) -> tuple[Path,
                 runs.append(row)
 
             qber_stats = _mean_std_ci([row["qber"] for row in observations])
-            yield_stats = _mean_std_ci([row["accepted_key_yield_bits"] for row in observations])
-            rate_stats = _mean_std_ci([
-                row["accepted_key_yield_bits"] / row["run_time_s"] if row["run_time_s"] else 0.0
-                for row in observations
-            ])
+            acceptance_stats = _mean_std_ci([float(row["accepted"]) for row in observations])
+            efficiency_stats = _mean_std_ci([row["key_efficiency_bits_per_signal"] for row in observations])
+            inverse_values = [float(row["signals_per_key_bit"]) for row in observations
+                              if row["signals_per_key_bit"] != ""]
+            inverse_stats = _mean_std_ci(inverse_values) if inverse_values else ("", "", "", "")
             summaries.append({
                 "sweep": sweep,
                 "parameter": parameter,
                 "parameter_value": value,
                 "runs": len(observations),
-                "acceptance_rate": statistics.mean(float(row["accepted"]) for row in observations),
+                "acceptance_rate_mean": acceptance_stats[0], "acceptance_rate_std": acceptance_stats[1],
+                "acceptance_rate_ci95_low": acceptance_stats[2], "acceptance_rate_ci95_high": acceptance_stats[3],
                 "qber_mean": qber_stats[0], "qber_std": qber_stats[1],
                 "qber_ci95_low": qber_stats[2], "qber_ci95_high": qber_stats[3],
-                "accepted_key_yield_bits_mean": yield_stats[0],
-                "accepted_key_yield_bits_std": yield_stats[1],
-                "accepted_key_yield_bits_ci95_low": yield_stats[2],
-                "accepted_key_yield_bits_ci95_high": yield_stats[3],
-                "key_rate_bits_per_second_mean": rate_stats[0],
-                "key_rate_bits_per_second_std": rate_stats[1],
-                "key_rate_bits_per_second_ci95_low": rate_stats[2],
-                "key_rate_bits_per_second_ci95_high": rate_stats[3],
+                "key_efficiency_bits_per_signal_mean": efficiency_stats[0],
+                "key_efficiency_bits_per_signal_std": efficiency_stats[1],
+                "key_efficiency_bits_per_signal_ci95_low": efficiency_stats[2],
+                "key_efficiency_bits_per_signal_ci95_high": efficiency_stats[3],
+                "signals_per_key_bit_mean": inverse_stats[0], "signals_per_key_bit_std": inverse_stats[1],
+                "signals_per_key_bit_ci95_low": inverse_stats[2], "signals_per_key_bit_ci95_high": inverse_stats[3],
                 "run_time_s_mean": statistics.mean(row["run_time_s"] for row in observations),
             })
 

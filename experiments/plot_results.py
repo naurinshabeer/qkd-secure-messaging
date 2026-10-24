@@ -1,4 +1,4 @@
-"""Create experiment plots from run_sweeps.py summary CSV."""
+"""Create QBER, key-efficiency, inverse-efficiency and acceptance plots."""
 
 from __future__ import annotations
 
@@ -7,6 +7,11 @@ import csv
 from pathlib import Path
 
 QBER_LIMIT = 0.11
+SWEEPS = {
+    "distance": ("Distance (km)", "distance"),
+    "noise": ("Channel noise (fraction)", "noise"),
+    "eve": ("Eve intercept fraction", "Eve fraction"),
+}
 
 
 def make_plots(input_dir: Path, output_dir: Path) -> list[Path]:
@@ -20,11 +25,11 @@ def make_plots(input_dir: Path, output_dir: Path) -> list[Path]:
     summary_path = input_dir / "summary.csv"
     with summary_path.open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
-    required = {"sweep", "parameter_value", "qber_mean", "qber_std", "qber_ci95_low",
-                "qber_ci95_high", "accepted_key_yield_bits_mean",
-                "accepted_key_yield_bits_ci95_low", "accepted_key_yield_bits_ci95_high",
-                "key_rate_bits_per_second_mean", "key_rate_bits_per_second_ci95_low",
-                "key_rate_bits_per_second_ci95_high"}
+    required = {"sweep", "parameter_value", "qber_mean", "qber_std", "qber_ci95_low", "qber_ci95_high",
+                "key_efficiency_bits_per_signal_mean", "key_efficiency_bits_per_signal_ci95_low",
+                "key_efficiency_bits_per_signal_ci95_high", "signals_per_key_bit_mean",
+                "signals_per_key_bit_ci95_low", "signals_per_key_bit_ci95_high", "acceptance_rate_mean",
+                "acceptance_rate_ci95_low", "acceptance_rate_ci95_high"}
     if not rows or not required.issubset(rows[0]):
         raise ValueError(f"{summary_path} is empty or missing required summary columns.")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -32,41 +37,43 @@ def make_plots(input_dir: Path, output_dir: Path) -> list[Path]:
                          "figure.dpi": 120, "savefig.dpi": 160})
     outputs: list[Path] = []
 
-    specs = [
-        ("distance", "qber_mean", "qber_std", "Distance (km)", "QBER (fraction)", "QBER vs distance", "qber_vs_distance.png", True),
-        ("noise", "qber_mean", "qber_std", "Channel noise (fraction)", "QBER (fraction)", "QBER vs channel noise", "qber_vs_noise.png", True),
-        ("eve", "qber_mean", "qber_std", "Eve intercept fraction", "QBER (fraction)", "QBER vs Eve intercept fraction", "qber_vs_eve.png", True),
-        ("distance", "accepted_key_yield_bits_mean", "accepted_key_yield_bits_ci95_low", "Distance (km)", "Accepted final key yield (bits/run)", "Accepted-key yield vs distance", "accepted_key_yield_vs_distance.png", False),
-        ("noise", "accepted_key_yield_bits_mean", "accepted_key_yield_bits_ci95_low", "Channel noise (fraction)", "Accepted final key yield (bits/run)", "Accepted-key yield vs channel noise", "accepted_key_yield_vs_noise.png", False),
-        ("eve", "accepted_key_yield_bits_mean", "accepted_key_yield_bits_ci95_low", "Eve intercept fraction", "Accepted final key yield (bits/run)", "Accepted-key yield vs Eve intercept fraction", "accepted_key_yield_vs_eve.png", False),
-        ("distance", "key_rate_bits_per_second_mean", "key_rate_bits_per_second_ci95_low", "Distance (km)", "Accepted final-key rate (bits/s)", "Accepted key rate vs distance", "key_rate_vs_distance.png", False),
-    ]
-    for sweep, metric, error, xlabel, ylabel, title, filename, qber in specs:
-        selected = sorted((row for row in rows if row["sweep"] == sweep), key=lambda row: float(row["parameter_value"]))
+    def draw(sweep: str, metric: str, low: str, high: str, ylabel: str, title: str,
+             filename: str, *, qber: bool = False, percent: bool = False) -> None:
+        selected = sorted((row for row in rows if row["sweep"] == sweep),
+                          key=lambda row: float(row["parameter_value"]))
+        # Inverse efficiency is undefined when no run at a point accepted key bits.
+        selected = [row for row in selected if row[metric] != "" and row[low] != "" and row[high] != ""]
         if not selected:
-            continue
+            return
         x = [float(row["parameter_value"]) for row in selected]
-        y = [float(row[metric]) for row in selected]
-        if qber:
-            errors = [float(row[error]) for row in selected]
-        else:
-            low_col = ("accepted_key_yield_bits_ci95_low" if metric.startswith("accepted_key")
-                       else "key_rate_bits_per_second_ci95_low")
-            high_col = ("accepted_key_yield_bits_ci95_high" if metric.startswith("accepted_key")
-                        else "key_rate_bits_per_second_ci95_high")
-            errors = [[max(0.0, value - float(row[low_col])) for value, row in zip(y, selected)],
-                      [max(0.0, float(row[high_col]) - value) for value, row in zip(y, selected)]]
+        scale = 100.0 if percent else 1.0
+        y = [float(row[metric]) * scale for row in selected]
+        lower = [max(0.0, (float(row[metric]) - float(row[low])) * scale) for row in selected]
+        upper = [max(0.0, (float(row[high]) - float(row[metric])) * scale) for row in selected]
         fig, ax = plt.subplots(figsize=(6.4, 4.2), constrained_layout=True)
-        ax.errorbar(x, y, yerr=errors, marker="o", capsize=3, linewidth=1.5, color="#256b68")
+        ax.errorbar(x, y, yerr=[lower, upper], marker="o", capsize=3, linewidth=1.5, color="#256b68")
         if qber:
             ax.axhline(QBER_LIMIT, linestyle="--", color="#a4493e", label=f"Acceptance cutoff ({QBER_LIMIT:.2f})")
             ax.legend(frameon=False)
-        ax.set(title=title, xlabel=xlabel, ylabel=ylabel)
+        ax.set(title=title, xlabel=SWEEPS[sweep][0], ylabel=ylabel)
         ax.grid(True, alpha=0.22)
         destination = output_dir / filename
         fig.savefig(destination, bbox_inches="tight")
         plt.close(fig)
         outputs.append(destination)
+
+    for sweep, (_, label) in SWEEPS.items():
+        draw(sweep, "qber_mean", "qber_ci95_low", "qber_ci95_high", "QBER (fraction)",
+             f"QBER vs {label}", f"qber_vs_{sweep}.png", qber=True)
+        draw(sweep, "key_efficiency_bits_per_signal_mean", "key_efficiency_bits_per_signal_ci95_low",
+             "key_efficiency_bits_per_signal_ci95_high", "Accepted final key bits per signal sent",
+             f"Key efficiency vs {label}", f"key_efficiency_vs_{sweep}.png")
+        draw(sweep, "signals_per_key_bit_mean", "signals_per_key_bit_ci95_low",
+             "signals_per_key_bit_ci95_high", "Signals sent per accepted key bit",
+             f"Signals needed per key bit vs {label}", f"signals_per_key_bit_vs_{sweep}.png")
+        draw(sweep, "acceptance_rate_mean", "acceptance_rate_ci95_low", "acceptance_rate_ci95_high",
+             "Accepted runs (%)", f"Acceptance rate vs {label}",
+             f"acceptance_rate_vs_{sweep}.png", percent=True)
     return outputs
 
 

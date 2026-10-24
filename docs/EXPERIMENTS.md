@@ -23,17 +23,17 @@ Run the full sweep (20 seeds at each of 20 parameter points, 400 simulator runs 
 
 The script calls `run_sequence_bb84` directly. It varies distance (1, 5, 10, 20, 30, 40, 50 km), noise (0, 0.01, 0.02, 0.05, 0.08, 0.11, 0.15), or Eve intercept fraction (0, 0.1, 0.25, 0.5, 0.75, 1.0), holding the other settings at the `LinkSettings` defaults. The simulator's acceptance rule is QBER below 0.11 and at least one matching Cascade key.
 
-The checked-in `experiments/results` dataset is a two-seed pilot across all 20 points (`--seeds 2`), not a completed default 20-seed sweep. In that pilot, the 40 SeQUeNCe runs accumulated 1,213 seconds (about 20 minutes 13 seconds) of measured simulation-call runtime. At that pilot's mean of 30.3 seconds per call, the default 400-run sweep is estimated at about 3 hours 22 minutes of simulator-call time; actual wall time will depend on the machine and run settings.
+The regenerated two-seed pilot took 575.4 seconds (about 9 minutes 35 seconds) for 40 SeQUeNCe calls, averaging 14.38 seconds per call. At that rate, the default 400-run sweep is estimated at about 1 hour 36 minutes of simulator-call time; actual wall time varies by machine and settings. The full 20-seed sweep was not run for this update.
 
-`runs.csv` contains one row per simulator run, including seed, QBER, accepted flag, final matching-key length, accepted-key yield, simulator signals, and wall-clock time. The current simulator does not expose raw or sifted key lengths, so those columns are empty rather than inferred. Final length is matching Cascade keys × 256 bits; accepted-key yield is zero for a rejected run. `summary.csv` has one row per parameter point with the mean, sample standard deviation, approximate normal 95% confidence interval for QBER, accepted-key yield and key rate, plus acceptance rate and mean runtime. The intervals use 1.96 × standard error (and are descriptive for this finite seed count).
+`runs.csv` contains one row per simulator run, including seed, QBER, acceptance, final matching-key length, accepted final key bits, `signals_sent`, and simulator wall-clock runtime. The simulator does not expose raw or sifted bit counts, so those columns are empty rather than inferred. Final key length is matching Cascade keys × 256 bits. Rejected runs contribute zero accepted final key bits and therefore zero key efficiency. Key efficiency is accepted final key bits divided by `signals_sent` (accepted final key bits per signal). Its inverse, signals needed per accepted key bit, is undefined and left blank on rejected runs. `summary.csv` reports the mean, sample standard deviation, and approximate normal 95% confidence interval for QBER, key efficiency, inverse efficiency (using only runs with accepted bits), and acceptance rate. Intervals use 1.96 × standard error and are descriptive for this finite seed count. Simulator runtime is recorded only as a compute-time diagnostic; it is not used as a key-rate metric.
 
-Produce seven error-bar plots (three QBER, three accepted-key yield, and key rate versus distance):
+Produce twelve error-bar plots: three QBER, three key-efficiency, three signals-needed-per-key-bit, and three acceptance-rate plots. The inverse-efficiency plot omits parameter points with no accepted keys because the inverse is undefined there.
 
 ```powershell
 .\.venv\Scripts\python.exe experiments\plot_results.py --input experiments\results --out experiments\results
 ```
 
-The QBER plots show the 0.11 acceptance cutoff. Accepted-key-yield and key-rate plots use the summary's 95% confidence intervals as error bars.
+The QBER plots show the 0.11 acceptance cutoff. The plots use the summary's 95% confidence intervals as error bars; acceptance rate is shown as a percentage.
 
 ## Network latency benchmark
 
@@ -49,10 +49,10 @@ The benchmark checks the live coordinator, picks the shortest available configur
 
 ## Observed trends
 
-These observations are from the two-seed full-parameter pilot in this repository's `experiments/results` directory. Two seeds are too few to establish stable statistical conclusions.
+These observations are from the regenerated two-seed pilot in `experiments/results`. Two seeds per parameter point are too few to establish stable statistical conclusions.
 
-- **Distance:** Mean QBER stayed between 0.0135 and 0.0151 from 1–50 km, with all 14 pilot runs accepted. It did not rise monotonically in this small sample.
-- **Noise and Eve:** Mean QBER increased across the noise points from 0.0097 at 0 noise to 0.0827 at 0.15 noise; acceptance was 50% at 0.15 because acceptance also requires a matching Cascade key. Mean Eve QBER rose from 0.0149 at zero interception to 0.2548 at full interception; the pilot's acceptance rate was 100% through 0.25 Eve fraction and 0% from 0.5 through 1.0.
-- **Yield and rate:** Distance runs each yielded 10,240 accepted final key bits in this pilot, while mean estimated key rate fell from about 597 bits/s at 1 km to 127 bits/s at 50 km as runtime increased. The noise and Eve yield plots also reflect the acceptance gate; rejected trials contribute zero accepted-key yield.
+- **Distance:** Mean QBER ranged from 0.0132 to 0.0151 across 1–50 km and did not rise steadily. QBER stays roughly flat with distance in this model while signals needed per key bit rises, from about 11.91 at 1 km to 53.44 at 50 km.
+- **Noise:** Mean QBER increased from 0.0099 at zero noise to 0.0814 at noise 0.15. All runs remained accepted in this pilot, and measured key efficiency stayed about 0.072 accepted bits per signal across the noise points.
+- **Eve:** Mean QBER increased from 0.0146 with no interception to 0.2579 at full interception. All runs were accepted through Eve fraction 0.25, while none were accepted at fractions 0.5 and above; inverse efficiency is undefined at those points.
 
 All results come from the project's SeQUeNCe-based simulation, not photon hardware. They illustrate the behavior of this model and are not measurements or predictions of real QKD hardware performance. The network latency benchmark has not been run for the checked-in dataset; its output files are created only when run against a live local topology. Any reported network timings are localhost prototype measurements, not production network benchmarks.
