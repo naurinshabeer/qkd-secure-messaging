@@ -13,13 +13,16 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+GENERATE_TIMEOUT = 900
 
-def request_json(base_url: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+
+def request_json(base_url: str, path: str, payload: dict[str, Any] | None = None,
+                 timeout: float = 5) -> dict[str, Any]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(base_url.rstrip("/") + path, data=body,
                                      headers={"Content-Type": "application/json"},
                                      method="POST" if payload is not None else "GET")
-    with urllib.request.urlopen(request, timeout=5) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read())
 
 
@@ -38,7 +41,7 @@ def ensure_keys(base_url: str, path: list[str]) -> None:
         current_links = {frozenset((item["a"], item["b"])): item for item in state["links"]}
         if all(edge(current_links, a, b)["pool_count"] > 0 for a, b in zip(path, path[1:])):
             return
-        request_json(base_url, "/api/keys/generate", {"count": 24})
+        request_json(base_url, "/api/keys/generate", {"count": 24}, timeout=GENERATE_TIMEOUT)
     raise RuntimeError("Selected path still has no matching link keys after provisioning; check SeQUeNCe acceptance/QBER.")
 
 

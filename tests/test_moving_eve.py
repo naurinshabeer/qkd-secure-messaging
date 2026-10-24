@@ -1,6 +1,7 @@
 import unittest
+import urllib.error
 
-from experiments.moving_eve import classical_hop_handshake, message_exposed
+from experiments.moving_eve import classical_hop_handshake, classify_http_failure, message_exposed
 
 
 class MovingEveLogicTests(unittest.TestCase):
@@ -33,6 +34,17 @@ class MovingEveLogicTests(unittest.TestCase):
         clean = classical_hop_handshake(eve_present=False, authenticated=True)
         self.assertTrue(clean["established"])
         self.assertEqual(clean["alice_key"], clean["bob_key"])
+
+    def test_request_timeout_is_not_reported_as_unreachable_coordinator(self):
+        error = classify_http_failure(
+            urllib.error.URLError(TimeoutError("operation timed out")),
+            "http://127.0.0.1:8765",
+        )
+        self.assertIn("coordinator", str(error).lower())
+        self.assertIn("reachable", str(error).lower())
+        self.assertIn("timed out", str(error).lower())
+        self.assertIn("several minutes", str(error).lower())
+        self.assertNotIn("Cannot reach coordinator", str(error))
 
 
 if __name__ == "__main__":

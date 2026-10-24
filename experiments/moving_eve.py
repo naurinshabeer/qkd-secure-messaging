@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import socket
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -17,6 +18,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 QBER_CUTOFF = 0.11
 DEFAULT_EVE_FRACTION = 0.75
+# Allow synchronous SeQUeNCe key provisioning to finish on slower machines.
+GENERATE_TIMEOUT = 900
 LINKS = ("A-R1", "R1-B", "A-R2", "R2-B")
 SCENARIOS = (
     ("clear", ()),
@@ -50,7 +53,12 @@ def classify_http_failure(exc: Exception, base_url: str) -> RuntimeError:
         except (ValueError, OSError):
             detail = str(exc)
         return RuntimeError(f"Coordinator rejected the request at {base_url}: {detail}. Check that all node processes use the same QKD_PROVISION_TOKEN and topology ports.")
-    return RuntimeError(f"Cannot reach coordinator at {base_url}. Start coordinator, Alice, Relay 1, Relay 2, and Bob using the README commands. Details: {exc}")
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(reason, (TimeoutError, socket.timeout)):
+        return RuntimeError(f"The coordinator at {base_url} is reachable, but the request timed out. Key generation can take several minutes; wait for it to finish and try again. Details: {exc}")
+    if isinstance(exc, (urllib.error.URLError, ConnectionError)):
+        return RuntimeError(f"Cannot reach coordinator at {base_url}. Start coordinator, Alice, Relay 1, Relay 2, and Bob using the README commands. Details: {exc}")
+    return RuntimeError(f"The request to coordinator at {base_url} failed: {exc}")
 
 
 def key_bytes(key: Any) -> bytes:
@@ -143,7 +151,7 @@ def run_scenario(base_url: str, output: Path, messages: int, eve_fraction: float
                     "distance_km": link["distance_km"], "channel_noise": link["noise"],
                     "eve_fraction": eve_fraction if link_id in eve_links else 0.0,
                 })
-            post_json(base_url, "/api/keys/generate", {"count": 24})
+            post_json(base_url, "/api/keys/generate", {"count": 24}, timeout=GENERATE_TIMEOUT)
             state = get_json(base_url, "/api/state")
             link_by_id = {link["id"]: link for link in state["links"]}
             pair_map = {frozenset((item["a"], item["b"])): item for item in state["links"]}
@@ -208,11 +216,11 @@ def run_scenario(base_url: str, output: Path, messages: int, eve_fraction: float
                     "distance_km": link["distance_km"], "channel_noise": link["noise"],
                     "eve_fraction": fraction if link["id"] == "A-R1" else 0.0,
                 })
-            post_json(base_url, "/api/keys/generate", {"count": 24})
+            post_json(base_url, "/api/keys/generate", {"count": 24}, timeout=GENERATE_TIMEOUT)
             sweep_state = get_json(base_url, "/api/state")
             sweep_links = {item["id"]: item for item in sweep_state["links"]}
             link = sweep_links["A-R1"]
-            rows.append({"record_type": "intercept_sweep", "round": 7 + index,
+            rows.append({"record_type": "intercept_sweep", "round": len(scenarios) + index,
                          "scenario": "intercept_fraction", "eve_links": "A-R1",
                          "eve_fraction": fraction, "qkd_paths": "", "qkd_delivered": 0,
                          "qkd_blocked": 0, "qkd_exposed": 0,
