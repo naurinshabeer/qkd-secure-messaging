@@ -1,0 +1,21 @@
+category,method,parameter,parameter_value,runs,median_ms,p95_ms,bytes_on_wire,public_key_bytes,ciphertext_bytes,signals_per_accepted_key_bit,qber,acceptance_rate,note
+classical_benchmark,X25519 + HKDF (both sides),,,1000,0.325749977491796,0.44540001545101404,64,32,,,,,Per handshake: two raw 32-byte ephemeral public keys; HKDF on each side.
+classical_benchmark,RSA-2048 key generation,,,100,75.10294998064637,186.43469997914508,,,,,,,Separate setup measurement; up to 100 generated keypairs.
+classical_benchmark,RSA-2048 OAEP encrypt,,,1000,0.034999975468963385,0.037299992982298136,256,294,256,,,,Per operation; public key distribution is a separate one-time 294-byte DER SPKI item here.
+classical_benchmark,RSA-2048 OAEP decrypt,,,1000,0.7719999994151294,1.9256999948993325,256,294,256,,,,Per operation; recipient already has the private key.
+classical_benchmark,Pre-shared key + HKDF (both sides),,,1000,0.011299969628453255,0.011500029359012842,0,,,,,,No key bytes exchanged; this moves the key-distribution problem elsewhere.
+classical_benchmark,ML-KEM,,,0,,,,,,,,,not measured here: installed cryptography has no ML-KEM API.
+bb84_simulated,BB84 simulated distance,distance_km,1,2,,,,,,11.9076171875,0.0131779296875,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated distance,distance_km,5,2,,,,,,13.887255859375,0.014730078125,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated distance,distance_km,10,2,,,,,,13.88232421875,0.014884765624999999,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated distance,distance_km,20,2,,,,,,18.306494140625,0.0148654296875,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated distance,distance_km,30,2,,,,,,25.737060546875,0.014887109374999999,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated distance,distance_km,40,2,,,,,,36.576562499999994,0.0151439453125,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated distance,distance_km,50,2,,,,,,53.441259765625,0.01376953125,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated Eve fraction,eve_fraction,0,2,,,,,,13.88232421875,0.014614453125,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated Eve fraction,eve_fraction,0.1,2,,,,,,13.88232421875,0.038103515625,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated Eve fraction,eve_fraction,0.25,2,,,,,,13.88232421875,0.0722966796875,1.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated Eve fraction,eve_fraction,0.5,2,,,,,,,0.1344970703125,0.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated Eve fraction,eve_fraction,0.75,2,,,,,,,0.1976033203125,0.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+bb84_simulated,BB84 simulated Eve fraction,eve_fraction,1.0,2,,,,,,,0.2578603515625,0.0,Simulated; summary.csv reports 2 run(s) per point. No simulator wall-clock timing comparison.
+attacker_demo,Unauthenticated X25519 MITM,attacker,Eve,1,,,,,,,,,Measured in-memory: Eve shares a key with Alice and another with Bob; endpoint check absent; Alice and Bob do not detect substitution.
