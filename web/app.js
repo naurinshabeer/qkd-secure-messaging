@@ -1,205 +1,463 @@
-const $ = (id) => document.getElementById(id);
-let toastTimer;
-let linkIsUp = true;
-let topologyMode = false;
+const $ = id => document.getElementById(id);
+const QBER_LIMIT = 0.11;
+const PRESETS = {
+  normal: {distance: 10, noise: 1, eve: 0, label: 'Normal'},
+  eve: {distance: 10, noise: 1, eve: 75, label: 'Eavesdropper present'},
+  distance: {distance: 50, noise: 1, eve: 0, label: 'Long distance'},
+  noise: {distance: 10, noise: 11, eve: 0, label: 'Noisy channel'}
+};
+let currentState = null;
+let currentInboxUrl = '';
+let inboxMessages = [];
+let lastDelivery = null;
+let statusOverride = '';
+let requestBusy = false;
 
 async function request(path, body) {
-  const response = await fetch(path, body === undefined ? {} : {
-    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
-  });
-  const data = await response.json();
+  let response;
+  try {
+    response = await fetch(path, body === undefined ? {} : {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+  } catch (_) {
+    throw new Error('The coordinator is not responding.');
+  }
+  let data;
+  try { data = await response.json(); } catch (_) { data = {}; }
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data;
 }
 
-function notify(message, isError = false) {
-  const toast = $('toast');
-  toast.textContent = message;
-  toast.className = `toast show${isError ? ' error' : ''}`;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.className = 'toast', 3800);
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
-function showError(error) { notify(error.message || 'Something went wrong.', true); }
-function pct(value) { return `${(value * 100).toFixed(2)}%`; }
-function timeLabel(timestamp) { return new Date(timestamp * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}); }
-function escapeHtml(value) { return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
+function percent(value, digits = 1) { return `${(Number(value) * 100).toFixed(digits)}%`; }
+function timeLabel(timestamp) {
+  return new Date(timestamp * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+function displayName(id) {
+  const value = String(id);
+  if (value.toLowerCase() === 'alice') return 'Alice';
+  if (value.toLowerCase() === 'bob') return 'Bob';
+  if (/^r\d+$/i.test(value)) return `Relay ${Number(value.slice(1))}`;
+  return value.replace(/[-_]+/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
+}
+function say(message, kind = 'info') {
+  $('status-text').textContent = message;
+  $('status-banner').className = `status-banner ${kind}`;
+  $('status-symbol').textContent = kind === 'error' ? '!' : kind === 'success' ? '✓' : 'i';
+}
 
-function render(state) {
-  if (state.topology) return renderTopology(state);
-  topologyMode = false;
-  $('topology-panel').hidden = true;
-  document.querySelector('.workspace').hidden = false;
-  document.querySelector('.operations').hidden = false;
-  document.querySelector('.page-heading').hidden = false;
-  const up = state.link_up;
-  linkIsUp = up;
-  $('header-status').textContent = up ? 'Alice + Bob online' : 'Link or node unavailable';
-  $('header-dot').style.background = up ? 'var(--mint-strong)' : 'var(--red)';
-  $('link-tag').classList.toggle('down', !up);
-  $('link-tag').querySelector('span').textContent = up ? 'LINK READY' : 'LINK FAILED';
-  $('network-visual').classList.toggle('down', !up);
-  $('link-detail').textContent = up ? 'SeQUeNCe · BB84 + Cascade' : 'No key exchange while link is down';
-  $('distance-label').textContent = `${state.settings.distance_km} km`;
-
-  const last = state.last_run;
-  if (last) {
-    const high = last.qber >= state.qber_limit;
-    $('run-id').textContent = `#${last.seed}`;
-    $('run-state').textContent = last.accepted ? 'Key batch accepted' : 'Key batch rejected';
-    $('qber-value').textContent = pct(last.qber);
-    $('qber-value').classList.toggle('bad', high);
-    $('qber-value').classList.toggle('good', !high);
-    $('qber-inline').textContent = `QBER ${pct(last.qber)}`;
-    $('qber-note').textContent = `${last.qber_samples} BB84 error sample${last.qber_samples === 1 ? '' : 's'} · ${high ? 'above cutoff' : 'below cutoff'}`;
-    $('detected-value').textContent = last.matching_cascade_keys.toLocaleString();
-    $('signals-note').textContent = `matching Cascade keys · ${last.signals_intercepted.toLocaleString()} intercepted`;
-    $('acceptance-value').textContent = last.accepted ? 'ACCEPT' : 'REJECT';
-    $('acceptance-value').classList.toggle('bad', !last.accepted);
-    $('acceptance-value').classList.toggle('good', last.accepted);
-    $('acceptance-note').textContent = last.accepted ? `${last.pool_added} added to pool` : 'No key material imported';
-    const throughput = last.cascade_privacy_throughput_bps;
-    $('rate-value').textContent = throughput == null ? '—' : `${(throughput / 1000).toFixed(2)} kb/s`;
-  } else {
-    $('run-id').textContent = 'IDLE'; $('run-state').textContent = 'Awaiting experiment';
-    $('qber-value').textContent = '—'; $('qber-inline').textContent = 'QBER —';
-    $('qber-note').textContent = 'No experiment data';
-    $('detected-value').textContent = '—'; $('signals-note').textContent = 'Available after run';
-    $('acceptance-value').textContent = '—'; $('acceptance-note').textContent = 'Cutoff: 11% teaching rule';
-    $('rate-value').textContent = '—';
+function helpfulError(error) {
+  const raw = String(error?.message || error || '').replace(/^HTTP \d+:\s*/i, '');
+  const text = raw.toLowerCase();
+  if (text.includes('coordinator is not responding')) return 'The coordinator is not responding. Start the coordinator process, then choose “Refresh status”.';
+  if (text.includes('both alice-to-bob relay paths') || text.includes('no available alice-to-bob relay path')) return 'There is no complete route with keys available. Restore a link or create keys on the open links.';
+  if (text.includes('both key pools are full') || text.includes('no shared capacity')) return 'The key pools are full. Send a message to use one key, then create more.';
+  if (text.includes('no available key') || text.includes('pool is empty') || text.includes('key pool is empty')) return 'There are no keys available on this link. Create more keys, or use another open route.';
+  if (text.includes('unknown peer_id') || text.includes('unknown key') || text.includes('key not found')) return 'The requested node or key could not be found. Refresh the network state, then create a new key if needed.';
+  if (text.includes('already reserved') || text.includes('already consumed') || text.includes('reservation')) return 'That one-time key is already in use or has been used. Refresh the page and try with an available key.';
+  if (text.includes('link is down') || text.includes('link down') || text.includes('link is unavailable') || text.includes('simulated link is down')) return 'This link is down. Restore it or send the message through another open route.';
+  if (text.includes('rejected the message')) return 'Bob could not verify the message. The reserved key was released; try sending again.';
+  if (text.includes('outcome is unknown')) return 'Delivery could not be confirmed. The key is held safely while the nodes reconcile; refresh status before trying again.';
+  if (text.includes('unknown topology link')) return 'That link is not in the loaded network map. Refresh the dashboard to reload its links.';
+  if (text.includes('distance must')) return 'Distance must be between 1 and 50 km. Adjust the distance slider and save again.';
+  if (text.includes('channel noise must')) return 'Channel noise must be between 0% and 15%. Adjust the noise slider and save again.';
+  if (text.includes('eve interception must')) return 'Eavesdropper interception must be between 0% and 100%. Adjust the slider and save again.';
+  if (text.includes('settings must be numeric') || text.includes('invalid types or values')) return 'One of the settings is not a valid number. Check the sliders and try again.';
+  if (text.includes('message must contain')) return 'Enter a message between 1 and 2,000 characters.';
+  if (text.includes('import count must')) return 'The requested key count is outside the allowed range. Refresh the page and try again.';
+  if (text.includes('valid provisioning token')) return 'The local nodes rejected the coordinator token. Set the same QKD_PROVISION_TOKEN for every process, then restart them.';
+  if (text.includes('request failed (404)') || text.includes('endpoint not found')) return 'The requested action is not available from this server version. Restart all project processes, then refresh.';
+  if (text.includes('request failed (400)') || text.includes('invalid')) return 'The request was not accepted. Check the message and settings, then try again.';
+  for (const role of ['alice', 'bob', 'r1', 'r2', 'relay']) {
+    if (text.includes(`${role} node unavailable`) || text.includes(`${role} node is unreachable`)) {
+      const name = role === 'r1' ? 'Relay 1' : role === 'r2' ? 'Relay 2' : role === 'relay' ? 'A relay' : role[0].toUpperCase() + role.slice(1);
+      return `${name}${name.endsWith('y') ? ' is' : "'s node is"} not responding. Start ${name === 'A relay' ? 'the relay' : name}'s process, then refresh.`;
+    }
   }
-
-  const count = state.pool_count;
-  $('pool-number').textContent = count;
-  $('pool-count').textContent = `A ${String(count).padStart(2,'0')}/${state.pool_limit} · B ${String(state.bob_pool_count || 0).padStart(2,'0')}/${state.pool_limit}`;
-  $('bob-pool-count').textContent = `Bob: ${state.bob_pool_count || 0} ready`;
-  $('pool-fill').style.width = `${count / state.pool_limit * 100}%`;
-  $('pool-caption').textContent = count
-    ? `${count} SeQUeNCe key${count === 1 ? '' : 's'} ready for one-time message use.`
-    : 'Run a SeQUeNCe experiment to populate the pool.';
-  $('key-list-count').textContent = String(state.key_ids.length).padStart(2, '0');
-  $('key-list').innerHTML = state.key_ids.length
-    ? state.key_ids.map(id => `<span class="key-id">${escapeHtml(id)}</span>`).join('')
-    : '<span class="empty-keys">No keys in memory</span>';
-  $('generate-keys').disabled = !up || count >= state.pool_limit;
-  $('send-message').disabled = !up || !count || !$('message').value.trim();
-  $('fail-link').hidden = !up;
-  $('restore-link').hidden = up;
-  $('event-list').innerHTML = state.events.map(event => `
-    <div class="event ${event.level}"><span class="event-time">${timeLabel(event.time)}</span><span class="event-message"><i class="event-marker"></i>${escapeHtml(event.message)}</span><span class="event-result">${event.level.toUpperCase()}</span></div>
-  `).join('');
-  refreshInbox(state.bob_inbox_url);
+  if (text.includes('timed out') || text.includes('unreachable') || text.includes('connection refused')) return 'A node did not answer in time. Check that Alice, both relays, and Bob are running, then refresh.';
+  if (text.includes('request failed (503)') || text.includes('unavailable')) return 'A network service is unavailable. Start the coordinator, Alice, both relays, and Bob, then refresh.';
+  return 'The action did not finish. Check that the local coordinator and node processes are running, then refresh.';
 }
 
-function renderTopology(state) {
-  topologyMode = true;
-  linkIsUp = state.links.some(link => link.up && link.pool_count > 0);
-  document.querySelector('.workspace').hidden = true;
-  document.querySelector('.operations').hidden = true;
-  document.querySelector('.page-heading').hidden = true;
-  $('topology-panel').hidden = false;
-  $('last-path').textContent = state.last_path ? `Last message: ${state.last_path.join(' → ')}` : 'No message path yet';
-  $('topology-links').innerHTML = state.links.map(link => `
-    <div class="topology-link"><b>${escapeHtml(link.a)} — ${escapeHtml(link.b)}</b>
-      <span>${link.distance_km} km · pool ${link.a_pool}/${link.b_pool} · QBER ${link.qber == null ? '—' : pct(link.qber)}</span>
-      <span>${link.up ? 'UP' : 'DOWN'}</span>
-      <button class="small-button ${link.up ? 'danger' : ''}" data-link="${escapeHtml(link.id)}" data-action="${link.up ? 'fail' : 'restore'}">${link.up ? 'Fail link' : 'Restore link'}</button>
-    </div>`).join('');
-  const available = state.links.filter(link => link.up).reduce((sum, link) => sum + link.pool_count, 0);
-  $('pool-number').textContent = String(available);
-  $('header-status').textContent = 'Alice, relays and Bob · localhost';
-  $('header-dot').style.background = 'var(--mint-strong)';
-  $('send-message').disabled = !available || !$('message').value.trim();
-  refreshInbox(state.bob_inbox_url);
-  $('topology-links').querySelectorAll('button[data-link]').forEach(button => {
-    button.addEventListener('click', async () => {
-      const action = button.dataset.action;
-      try { render(await request(`/api/links/${encodeURIComponent(button.dataset.link)}/${action}`, {})); }
-      catch (error) { showError(error); }
-    });
+function routeAvailable(state, path) {
+  return path.slice(0, -1).every((node, index) => {
+    const next = path[index + 1];
+    const link = state.links.find(edge => new Set([edge.a, edge.b]).has(node) && new Set([edge.a, edge.b]).has(next));
+    return Boolean(link?.up && link.pool_count > 0);
   });
 }
+function pathDistance(state, path) {
+  return path.slice(0, -1).reduce((total, node, index) => {
+    const next = path[index + 1];
+    const link = state.links.find(edge => new Set([edge.a, edge.b]).has(node) && new Set([edge.a, edge.b]).has(next));
+    return total + Number(link?.distance_km || 0);
+  }, 0);
+}
+function stateMessage(state) {
+  if (stateOverride()) return statusOverride;
+  if (!state.topology) {
+    if (!state.alice_online) return "Alice's node is not responding. Start Alice's process, then refresh.";
+    if (!state.bob_online) return "Bob's node is not responding. Start Bob's process, then refresh.";
+    if (!state.link_up) return 'The Alice–Bob link is down. Restore the link, then create keys or send again.';
+    if (!state.pool_count) return 'Alice and Bob are connected, but have no shared keys yet. Create keys to begin.';
+    return `${state.pool_count} matching key${state.pool_count === 1 ? '' : 's'} ready. Write a message to Bob, or create more keys.`;
+  }
+  const openPaths = (state.paths || []).filter(path => path.slice(0, -1).every((node, index) => {
+    const next = path[index + 1];
+    return state.links.some(link => link.up && new Set([link.a, link.b]).has(node) && new Set([link.a, link.b]).has(next));
+  }));
+  if (!openPaths.length) return 'Every route to Bob has a failed link. Restore a link before creating keys or sending a message.';
+  if (lastDelivery) return `Message delivered through ${(lastDelivery.path?.length ? lastDelivery.path : ['alice', 'bob']).map(displayName).join(' → ')}. Bob can read it below; one end-to-end message key was used.`;
+  const usablePaths = openPaths.filter(path => routeAvailable(state, path));
+  if (usablePaths.length && state.links.some(link => !link.up)) {
+    const route = usablePaths.sort((left, right) => pathDistance(state, left) - pathDistance(state, right))[0];
+    const failed = state.links.find(link => !link.up);
+    return `Link ${displayName(failed.a)}–${displayName(failed.b)} is down. Messages can use ${route.slice(1, -1).map(displayName).join(' or ')}.`;
+  }
+  if (!state.links.some(link => link.pool_count > 0 && link.up)) return 'The network is connected, but no link has keys yet. Create keys to begin.';
+  if (!usablePaths.length) {
+    const openLink = state.links.find(link => link.up && link.pool_count === 0);
+    return openLink
+      ? `No keys left on ${displayName(openLink.a)}–${displayName(openLink.b)}. Create keys on the open links.`
+      : 'No complete route has keys on every link. Create keys on the open links or restore a failed link.';
+  }
+  return 'The network is ready. Create keys, then write a message to send to Bob.';
+}
+function stateOverride() { return Boolean(statusOverride); }
 
-async function refreshInbox(url) {
-  if (!url) return;
-  try {
-    const response = await fetch(url);
-    const data = await response.json();
-    const latest = data.messages[data.messages.length - 1];
-    if (latest) $('delivery-result').innerHTML = `<div class="receipt"><div class="side-label"><span class="side-avatar bob">B</span><div><b>Bob's inbox</b><small>DECRYPTED ON BOB NODE</small></div></div><div class="receipt-head"><span>${escapeHtml(latest.message_id)}</span></div><p>${escapeHtml(latest.text)}</p></div>`;
-  } catch (_) { /* Bob's inbox remains available from Bob's node when it is online. */ }
+function render(state) {
+  currentState = state;
+  currentInboxUrl = state.bob_inbox_url || '';
+  $('header-state').textContent = state.topology ? 'Four-link relay network' : 'Alice and Bob network';
+  if (!statusOverride) say(stateMessage(state));
+  renderNetwork(state);
+  renderResult(state);
+  renderAdvanced(state);
+  renderEvents(state.events || []);
+  updateActions(state);
+  if (currentInboxUrl) loadInbox(currentInboxUrl);
 }
 
-async function refresh() { render(await request('/api/state')); }
+function renderNetwork(state) {
+  const links = state.topology ? state.links : [{
+    id: 'direct', a: 'alice', b: 'bob', distance_km: state.settings.distance_km,
+    up: state.link_up, a_pool: state.pool_count, b_pool: state.bob_pool_count,
+    pool_count: Math.min(state.pool_count, state.bob_pool_count), qber: state.last_run?.qber ?? null
+  }];
+  const nodes = [...new Set(links.flatMap(link => [link.a, link.b]))];
+  const relays = nodes.filter(node => !['alice', 'bob'].includes(node.toLowerCase())).sort();
+  const coords = {};
+  nodes.forEach(node => {
+    if (node.toLowerCase() === 'alice') coords[node] = {x: 66, y: 130};
+    else if (node.toLowerCase() === 'bob') coords[node] = {x: 574, y: 130};
+    else {
+      const index = relays.indexOf(node);
+      const y = relays.length === 1 ? 130 : 62 + index * (136 / Math.max(1, relays.length - 1));
+      coords[node] = {x: 320, y};
+    }
+  });
+  const used = new Set();
+  if (state.topology && state.last_path) {
+    state.last_path.slice(0, -1).forEach((node, index) => used.add(pairId(node, state.last_path[index + 1])));
+  }
+  $('diagram-links').innerHTML = links.map(link => {
+    const from = coords[link.a], to = coords[link.b];
+    const active = used.has(pairId(link.a, link.b));
+    const middleX = (from.x + to.x) / 2;
+    const middleY = (from.y + to.y) / 2;
+    return `<g class="edge-group ${link.up ? 'is-up' : 'is-down'} ${active ? 'path-used' : ''}">
+      <line class="diagram-edge" x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}"></line>
+      <circle class="edge-dot" cx="${middleX}" cy="${middleY}" r="5"></circle>
+      ${active ? `<circle class="path-pulse" cx="${middleX}" cy="${middleY}" r="10"></circle>` : ''}
+    </g>`;
+  }).join('');
+  $('diagram-nodes').innerHTML = nodes.map(node => {
+    const point = coords[node];
+    return `<g class="diagram-node"><rect x="${point.x - 48}" y="${point.y - 22}" width="96" height="44" rx="14"></rect><text x="${point.x}" y="${point.y + 5}" text-anchor="middle">${escapeHtml(displayName(node))}</text></g>`;
+  }).join('');
 
-$('distance').addEventListener('input', e => $('distance-output').textContent = `${e.target.value} km`);
-$('noise').addEventListener('input', e => $('noise-output').textContent = `${e.target.value}%`);
-$('eve').addEventListener('input', e => $('eve-output').textContent = `${e.target.value}%`);
-$('message').addEventListener('input', e => {
-  $('char-count').textContent = `${e.target.value.length.toLocaleString()} / 2,000`;
-  $('send-message').disabled = !$('message').value.trim() || !Number($('pool-number').textContent) || !linkIsUp;
-});
+  const labelPaths = state.topology && state.last_path ? state.last_path.map(displayName).join(' → ') : '';
+  $('last-path').textContent = labelPaths ? `Last message: ${labelPaths}` : 'No message sent yet';
+  $('path-note').textContent = labelPaths
+    ? `Highlighted route: ${labelPaths}. The bright dots mark the links used.`
+    : 'The bright line will show the route used after a message is sent.';
+  $('link-list').innerHTML = links.map(link => {
+    const qber = link.qber == null ? 'Not measured yet' : `Error rate ${percent(link.qber)} — ${link.qber < QBER_LIMIT ? 'healthy' : 'needs attention'}`;
+    const upLabel = link.up ? '✓ Link is up' : '✕ Link is down';
+    const action = link.up ? 'fail' : 'restore';
+    const buttonText = link.up ? 'Fail link' : 'Restore link';
+    return `<article class="link-card ${link.up ? 'link-up' : 'link-down'}">
+      <div class="link-card-heading"><h3>${escapeHtml(displayName(link.a))}–${escapeHtml(displayName(link.b))}</h3><span class="link-status">${upLabel}</span></div>
+      <div class="link-facts"><span><b>Distance</b>${Number(link.distance_km).toLocaleString()} km</span><span><b>Available keys</b>${Number(link.pool_count || 0).toLocaleString()}</span><span><b>Error check</b>${escapeHtml(qber)}</span></div>
+      <button type="button" class="link-control ${link.up ? 'fail-control' : ''}" data-link-id="${escapeHtml(link.id)}" data-action="${action}">${buttonText}</button>
+    </article>`;
+  }).join('');
+}
 
-$('topology-generate').addEventListener('click', async () => {
+function pairId(a, b) { return [String(a), String(b)].sort().join('|'); }
+
+function renderResult(state) {
+  const sentence = $('result-sentence');
+  if (lastDelivery) {
+    const route = (lastDelivery.path || state.last_path || ['alice', 'bob']).map(displayName).join(' → ');
+    sentence.textContent = `Message delivered via ${route}. Bob's node verified and decrypted it; one message key was used.`;
+    $('network-view').textContent = Number.isFinite(lastDelivery.ciphertext_bytes)
+      ? `What the network saw: ${lastDelivery.ciphertext_bytes} encrypted bytes. The browser does not receive the key or ciphertext contents.`
+      : 'What the network saw: an encrypted message. The browser does not receive key material.';
+    return;
+  }
+  $('network-view').textContent = 'What the network saw: no encrypted message yet.';
+  if (!state.topology && state.last_run) {
+    const run = state.last_run;
+    if (run.accepted) {
+      sentence.textContent = `The simulator did not detect an error above the 11% limit: the error rate was ${percent(run.qber)}. ${Number(run.pool_added)} matching key${run.pool_added === 1 ? '' : 's'} were accepted and can be used once each.`;
+    } else if (Number(run.qber) >= Number(state.qber_limit || QBER_LIMIT)) {
+      sentence.textContent = `The simulator detected a suspicious error rate of ${percent(run.qber)}, at or above the 11% limit, so these keys were rejected and not used.`;
+    } else {
+      sentence.textContent = 'The error check was below the limit, but the simulator did not produce a matching key to use.';
+    }
+    return;
+  }
+  if (state.topology && state.links.some(link => link.qber != null)) {
+    const measured = state.links.filter(link => link.qber != null);
+    const highest = measured.reduce((best, link) => link.qber > best.qber ? link : best, measured[0]);
+    if (highest.qber >= QBER_LIMIT) {
+      sentence.textContent = `${displayName(highest.a)}–${displayName(highest.b)} had an error rate of ${percent(highest.qber)}, at or above the 11% limit. Keys from that link were rejected.`;
+    } else {
+      sentence.textContent = `The highest measured link error rate is ${percent(highest.qber)}, below the 11% limit. Accepted link keys are ready for a message.`;
+    }
+    return;
+  }
+  sentence.textContent = 'The result will appear here after you create keys or send a message.';
+}
+
+async function loadInbox(url) {
   try {
-    const result = await request('/api/keys/generate', {count: 24});
-    render(result.state);
-    notify(`${result.generated} keys provisioned across available links.`);
-  } catch (error) { showError(error); }
-});
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Bob inbox request failed');
+    const data = await response.json();
+    inboxMessages = Array.isArray(data.messages) ? data.messages.slice(-5) : [];
+    $('inbox-messages').innerHTML = inboxMessages.length
+      ? inboxMessages.map(message => `<article class="inbox-message"><p class="inbox-label">What Bob sees</p><blockquote>${escapeHtml(message.text)}</blockquote></article>`).join('')
+      : '<p class="empty-note">No messages received yet.</p>';
+  } catch (_) {
+    $('inbox-messages').innerHTML = '<p class="empty-note">Bob’s inbox is not responding. Start Bob’s process, then refresh.</p>';
+    if (!statusOverride) {
+      statusOverride = "Bob's node is not responding. Start Bob's process, then refresh.";
+      say(statusOverride, 'error');
+    }
+  }
+}
 
-$('apply-settings').addEventListener('click', async () => {
+function renderAdvanced(state) {
+  const values = [];
+  if (state.last_run) {
+    const run = state.last_run;
+    values.push(['Run ID', run.seed ?? '—']);
+    values.push(['Signals sent', Number(run.signals_sent || 0).toLocaleString()]);
+    values.push(['Signals intercepted', Number(run.signals_intercepted || 0).toLocaleString()]);
+    values.push(['Matching keys from run', Number(run.matching_cascade_keys || 0).toLocaleString()]);
+    values.push(['Distance', `${state.settings.distance_km} km`]);
+    values.push(['Channel noise', percent(state.settings.channel_noise)]);
+    values.push(['Eavesdropper interception', percent(state.settings.eve_fraction)]);
+    if (Array.isArray(state.key_ids) && state.key_ids.length) values.push(['Available key IDs', state.key_ids.join(', ')]);
+  }
+  if (state.topology) {
+    values.push(['Last route IDs', state.last_path?.join(' → ') || 'No route used yet']);
+    for (const link of state.links) {
+      values.push([`${link.id} settings`, `${link.distance_km} km · noise ${percent(link.noise)} · interception ${percent(link.eve)}`]);
+      values.push([`${link.id} pool counts`, `${link.a_pool} / ${link.b_pool}`]);
+    }
+  } else {
+    values.push(['Alice key pool', `${state.pool_count} / ${state.pool_limit}`]);
+    values.push(['Bob key pool', `${state.bob_pool_count} / ${state.pool_limit}`]);
+  }
+  if (lastDelivery) {
+    values.push(['Message ID', lastDelivery.message_id || '—']);
+    values.push(['Key ID', lastDelivery.key_id || '—']);
+    values.push(['Encrypted payload length', `${lastDelivery.ciphertext_bytes} bytes`]);
+  }
+  $('advanced-content').innerHTML = values.map(([label, value]) => {
+    const idValue = /\bID(s)?\b/.test(label);
+    return `<div class="advanced-item"><span>${escapeHtml(label)}</span><span class="${idValue ? 'technical-id' : ''}">${escapeHtml(value)}</span></div>`;
+  }).join('') || '<p class="empty-note">No technical details yet.</p>';
+}
+
+function renderEvents(events) {
+  $('event-list').innerHTML = events.length ? events.slice(0, 8).map(event => {
+    // Older event text can contain a key identifier; keep those details in the collapsed section.
+    const plain = String(event.message).replace(/QK-[A-F0-9]+/gi, 'a one-time key').replace(/E2E-[A-F0-9]+/gi, 'an end-to-end key');
+    const level = ['success', 'warning', 'error'].includes(event.level) ? event.level : 'info';
+    return `<article class="event-row ${level}"><span class="event-symbol" aria-hidden="true">${level === 'success' ? '✓' : level === 'warning' ? '!' : '·'}</span><time>${timeLabel(event.time)}</time><p>${escapeHtml(plain)}</p></article>`;
+  }).join('') : '<p class="empty-note">No events yet.</p>';
+}
+
+function updateActions(state) {
+  let canGenerate = false;
+  let generateReason = '';
+  let availableCount = 0;
+  if (!state.topology) {
+    availableCount = Number(state.pool_count || 0);
+    canGenerate = Boolean(state.link_up && availableCount < Number(state.pool_limit));
+    if (!state.alice_online) generateReason = "Alice's node is not responding.";
+    else if (!state.bob_online) generateReason = "Bob's node is not responding.";
+    else if (!state.link_up) generateReason = 'Restore the link first.';
+    else if (!canGenerate) generateReason = 'The key pools are full. Send a message to make room.';
+  } else {
+    const eligible = state.links.filter(link => link.up && (link.a_pool < 24 || link.b_pool < 24));
+    availableCount = state.links.filter(link => link.up).reduce((sum, link) => sum + Number(link.pool_count || 0), 0);
+    canGenerate = eligible.length > 0;
+    if (!canGenerate) generateReason = state.links.some(link => link.up) ? 'Open links are full. Send a message to use keys first.' : 'Restore at least one link first.';
+  }
+  $('generate-keys').disabled = requestBusy || !canGenerate;
+  $('key-action-reason').textContent = requestBusy ? 'A request is in progress…' : canGenerate ? 'Creates keys on available links.' : generateReason;
+  $('pool-summary').textContent = state.topology
+    ? `${availableCount} matching link keys available across the open links.`
+    : `${state.pool_count} key${state.pool_count === 1 ? '' : 's'} ready at Alice; ${state.bob_pool_count} at Bob.`;
+
+  const messageReady = Boolean($('message').value.trim());
+  const hasRoute = state.topology
+    ? (state.paths || []).some(path => routeAvailable(state, path))
+    : Boolean(state.link_up && state.alice_online && state.bob_online && state.pool_count > 0);
+  const canSend = messageReady && hasRoute;
+  $('send-message').disabled = requestBusy || !canSend;
+  if (requestBusy) $('send-action-reason').textContent = 'A request is in progress…';
+  else if (!messageReady) $('send-action-reason').textContent = 'Write a message to enable sending.';
+  else if (!state.topology && !state.alice_online) $('send-action-reason').textContent = "Alice's node is not responding.";
+  else if (!state.topology && !state.bob_online) $('send-action-reason').textContent = "Bob's node is not responding.";
+  else if (!hasRoute) $('send-action-reason').textContent = state.topology ? 'Create keys on a complete open route first.' : 'Create keys first.';
+  else $('send-action-reason').textContent = 'Your message will be encrypted before delivery.';
+}
+
+async function refresh({clearError = false} = {}) {
+  if (clearError) statusOverride = '';
+  const state = await request('/api/state');
+  render(state);
+  return state;
+}
+
+async function runAction(action, successMessage) {
+  statusOverride = '';
+  requestBusy = true;
+  if (currentState) updateActions(currentState);
   try {
-    await request('/api/settings', {
-      distance_km: Number($('distance').value),
-      channel_noise: Number($('noise').value) / 100,
-      eve_fraction: Number($('eve').value) / 100
-    });
-    await refresh();
-    notify('Settings saved for the next SeQUeNCe run.');
-  } catch (error) { showError(error); }
-});
+    const result = await action();
+    if (result?.state) render(result.state);
+    else await refresh();
+    say(successMessage(result), 'success');
+    return result;
+  } catch (error) {
+    statusOverride = helpfulError(error);
+    say(statusOverride, 'error');
+    return null;
+  } finally {
+    requestBusy = false;
+    if (currentState) updateActions(currentState);
+  }
+}
 
-$('generate-keys').addEventListener('click', async () => {
-  const button = $('generate-keys');
-  button.disabled = true;
-  $('generate-label').textContent = 'SeQUeNCe is running…';
-  $('run-state').textContent = 'BB84 + Cascade in progress';
-  try {
-    const result = await request('/api/keys/generate', {count:24 - Number($('pool-number').textContent)});
-    render(result.state);
-    notify(`${result.generated} key${result.generated === 1 ? '' : 's'} imported from SeQUeNCe.`);
-  } catch (error) { showError(error); await refresh(); }
-  finally { $('generate-label').textContent = 'Run SeQUeNCe experiment'; await refresh(); }
-});
+async function generateKeys() {
+  lastDelivery = null;
+  await runAction(async () => request('/api/keys/generate', {count: 24}), result =>
+    result.generated ? `Created ${result.generated} matching key${result.generated === 1 ? '' : 's'}. You can now send a message.` : 'The simulation did not produce any accepted keys. Check the error rate and try a different experiment.');
+}
 
-$('send-message').addEventListener('click', async () => {
-  $('send-message').disabled = true;
-  try {
-    const result = await request('/api/messages', {text:$('message').value});
-    await refresh();
-    await refreshInbox((await request('/api/state')).bob_inbox_url);
-    $('message').value = '';
-    $('char-count').textContent = '0 / 2,000';
-    await refresh();
-    notify('Message authenticated and delivered. One key consumed.');
-  } catch (error) { showError(error); await refresh(); }
-});
+async function sendMessage() {
+  const text = $('message').value;
+  if (!text.trim()) return;
+  lastDelivery = null;
+  const result = await runAction(() => request('/api/messages', {text}), data =>
+    `Bob received your message. One key was used; you can send another if a route still has keys.`);
+  if (!result) return;
+  lastDelivery = {
+    message_id: result.message_id,
+    key_id: result.key_id,
+    ciphertext_bytes: Number(result.ciphertext_bytes),
+    path: result.path || currentState?.last_path || ['alice', 'bob']
+  };
+  $('message').value = '';
+  updateCharCount();
+  try { await refresh(); } catch (_) { /* Keep the delivery receipt visible if a later refresh fails. */ }
+  if (currentState) renderAdvanced(currentState);
+  if (currentInboxUrl) await loadInbox(currentInboxUrl);
+  say(`Message delivered. Bob can read it below; ${lastDelivery.ciphertext_bytes} encrypted bytes crossed the network.`, 'success');
+}
 
-$('fail-link').addEventListener('click', async () => { try { render(await request('/api/link/fail', {})); notify('Link marked unavailable.'); } catch (e) { showError(e); } });
-$('restore-link').addEventListener('click', async () => { try { render(await request('/api/link/restore', {})); notify('Link restored.'); } catch (e) { showError(e); } });
+async function changeLink(linkId, action) {
+  const friendly = action === 'fail' ? 'failed' : 'restored';
+  const endpoint = currentState?.topology
+    ? `/api/links/${encodeURIComponent(linkId)}/${action}`
+    : `/api/link/${action}`;
+  const state = await runAction(() => request(endpoint, {}), () => {
+    const link = currentState?.links.find(item => item.id === linkId);
+    return link ? `${displayName(link.a)}–${displayName(link.b)} is ${friendly}. ${friendly === 'failed' ? 'The other route can still carry messages if it has keys.' : 'You can create keys on this route.'}` : `Link ${friendly}.`;
+  });
+  if (state?.topology) statusOverride = $('status-text').textContent;
+}
+
+function formatSettings() {
+  $('distance-output').textContent = `${$('distance').value} km`;
+  $('noise-output').textContent = `${$('noise').value}%`;
+  $('eve-output').textContent = `${$('eve').value}%`;
+}
+function updateCharCount() {
+  $('char-count').textContent = `${$('message').value.length.toLocaleString()} / 2,000`;
+  if (currentState) updateActions(currentState);
+}
+
+async function saveSettings(presetName = '') {
+  const settings = {
+    distance_km: Number($('distance').value),
+    channel_noise: Number($('noise').value) / 100,
+    eve_fraction: Number($('eve').value) / 100
+  };
+  const result = await runAction(() => request('/api/settings', settings), () => {
+    const prefix = presetName ? `${presetName} preset saved.` : 'Experiment settings saved.';
+    return currentState?.topology
+      ? `${prefix} Relay links still use their individual values from the topology file.`
+      : `${prefix} They will be used the next time you create keys.`;
+  });
+  if (result) $('customize-section').open = true;
+}
+
+function setPreset(name) {
+  const preset = PRESETS[name];
+  if (!preset) return;
+  $('distance').value = preset.distance;
+  $('noise').value = preset.noise;
+  $('eve').value = preset.eve;
+  document.querySelectorAll('[data-preset]').forEach(button => button.classList.toggle('selected', button.dataset.preset === name));
+  formatSettings();
+  saveSettings(preset.label);
+}
+
+$('refresh-state').addEventListener('click', async () => {
+  try { await refresh({clearError: true}); }
+  catch (error) { statusOverride = helpfulError(error); say(statusOverride, 'error'); }
+});
+$('generate-keys').addEventListener('click', generateKeys);
+$('send-message').addEventListener('click', sendMessage);
+$('message').addEventListener('input', updateCharCount);
+$('apply-settings').addEventListener('click', () => saveSettings());
+['distance', 'noise', 'eve'].forEach(id => $(id).addEventListener('input', formatSettings));
+document.querySelectorAll('[data-preset]').forEach(button => button.addEventListener('click', () => setPreset(button.dataset.preset)));
+$('link-list').addEventListener('click', event => {
+  const button = event.target.closest('[data-link-id]');
+  if (button) changeLink(button.dataset.linkId, button.dataset.action);
+});
 $('reset-demo').addEventListener('click', async () => {
-  try {
-    render(await request('/api/reset', {}));
-    $('message').value = ''; $('char-count').textContent = '0 / 2,000';
-    $('delivery-result').innerHTML = '<div class="side-label"><span class="side-avatar bob">B</span><div><b>Bob</b><small>DESTINATION</small></div></div><div class="received-empty"><span class="empty-mark">···</span><p>Decrypted message will appear here after delivery.</p></div>';
-    notify('Session reset.');
-  } catch (e) { showError(e); }
-});
-$('method-toggle').addEventListener('click', e => {
-  const note = $('method-note'), open = note.hidden;
-  note.hidden = !open;
-  e.currentTarget.setAttribute('aria-expanded', String(open));
-  e.currentTarget.innerHTML = `Model notes <span>${open ? '−' : '＋'}</span>`;
+  lastDelivery = null;
+  inboxMessages = [];
+  $('message').value = '';
+  updateCharCount();
+  const result = await runAction(() => request('/api/reset', {}), () => 'Experiment reset. Create keys to start again.');
+  if (result?.topology) await loadInbox(result.bob_inbox_url);
 });
 
-refresh().catch(showError);
+formatSettings();
+refresh().catch(error => {
+  statusOverride = helpfulError(error);
+  say(statusOverride, 'error');
+});

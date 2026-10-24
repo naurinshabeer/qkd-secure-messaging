@@ -54,7 +54,7 @@ class CoordinatorHttpTests(unittest.TestCase):
     def test_frontend_and_state_are_served_without_keys(self):
         with urlopen(self.base + "/", timeout=3) as response:
             self.assertEqual(response.status, 200)
-            self.assertIn(b"TCP APPLICATION SOCKET", response.read())
+            self.assertIn(b"Send a message using a shared secret", response.read())
         for asset in ("/console.css", "/app.js"):
             with urlopen(self.base + asset, timeout=3) as response:
                 self.assertEqual(response.status, 200)
