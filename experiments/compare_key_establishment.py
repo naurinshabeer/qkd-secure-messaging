@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa, x25519
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +21,8 @@ CSV_FIELDS = [
     "category", "method", "parameter", "parameter_value", "runs",
     "median_ms", "p95_ms", "bytes_on_wire", "public_key_bytes",
     "ciphertext_bytes", "signals_per_accepted_key_bit", "qber",
-    "acceptance_rate", "note",
+    "acceptance_rate", "alice_matches_bob", "alice_matches_eve",
+    "bob_matches_eve", "signature_verification", "handshake_result", "note",
 ]
 RSA_KEYGEN_REPETITIONS = 100
 RSA_BITS = 2048
@@ -217,7 +219,7 @@ def _bb84_rows(summary_csv: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _mitm_row() -> dict[str, Any]:
+def _mitm_rows() -> list[dict[str, Any]]:
     # Eve replaces each unauthenticated ephemeral public key and establishes a
     # distinct X25519/HKDF secret with Alice and Bob.
     alice = x25519.X25519PrivateKey.generate()
@@ -231,14 +233,63 @@ def _mitm_row() -> dict[str, Any]:
     success = alice_eve == eve_alice and bob_eve == eve_bob and alice_eve != bob_eve
     if not success:
         raise AssertionError("In-memory X25519 MITM demonstration failed its key checks")
-    return {
+    unauthenticated = {
         "category": "attacker_demo", "method": "Unauthenticated X25519 MITM",
         "parameter": "attacker", "parameter_value": "Eve", "runs": 1,
         "median_ms": "", "p95_ms": "", "bytes_on_wire": "",
         "public_key_bytes": "", "ciphertext_bytes": "",
         "signals_per_accepted_key_bit": "", "qber": "", "acceptance_rate": "",
-        "note": "Measured in-memory: Eve shares a key with Alice and another with Bob; endpoint check absent; Alice and Bob do not detect substitution.",
+        "alice_matches_bob": str(alice_eve == bob_eve),
+        "alice_matches_eve": str(alice_eve == eve_alice),
+        "bob_matches_eve": str(bob_eve == eve_bob),
+        "signature_verification": "not used",
+        "handshake_result": "completed; no detection",
+        "note": "Measured in-memory. alice_key == bob_key: False; alice_key == eve_alice_key: True; bob_key == eve_bob_key: True. No protocol step compares Alice's key with Bob's; detection needs an out-of-band or authenticated check.",
     }
+
+    # The public identity keys are pre-trusted by the opposite endpoint. Both
+    # endpoints sign their ephemeral X25519 public key; Eve substitutes her own.
+    alice_identity = Ed25519PrivateKey.generate()
+    bob_identity = Ed25519PrivateKey.generate()
+    trusted_alice_identity = alice_identity.public_key()
+    trusted_bob_identity = bob_identity.public_key()
+    alice_ephemeral = x25519.X25519PrivateKey.generate()
+    bob_ephemeral = x25519.X25519PrivateKey.generate()
+    alice_public = alice_ephemeral.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    bob_public = bob_ephemeral.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    alice_signature = alice_identity.sign(alice_public)
+    bob_signature = bob_identity.sign(bob_public)
+    eve_to_bob = x25519.X25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    eve_to_alice = x25519.X25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    alice_at_bob_verified = bob_at_alice_verified = True
+    try:
+        trusted_alice_identity.verify(alice_signature, eve_to_bob)
+    except Exception:
+        alice_at_bob_verified = False
+    try:
+        trusted_bob_identity.verify(bob_signature, eve_to_alice)
+    except Exception:
+        bob_at_alice_verified = False
+    if alice_at_bob_verified or bob_at_alice_verified:
+        raise AssertionError("A substituted X25519 key unexpectedly passed signature verification")
+    signed = {
+        "category": "attacker_demo", "method": "Ed25519-signed X25519 MITM",
+        "parameter": "attacker", "parameter_value": "Eve", "runs": 1,
+        "median_ms": "", "p95_ms": "", "bytes_on_wire": "",
+        "public_key_bytes": "", "ciphertext_bytes": "",
+        "signals_per_accepted_key_bit": "", "qber": "", "acceptance_rate": "",
+        "alice_matches_bob": "not derived",
+        "alice_matches_eve": "not derived",
+        "bob_matches_eve": "not derived",
+        "signature_verification": "Alice verifying Bob's substituted key: FAILED; Bob verifying Alice's substituted key: FAILED",
+        "handshake_result": "aborted",
+        "note": "Measured in-memory. Both peers sign their ephemeral public key with Ed25519 under pre-trusted identity keys; Eve's replacements fail verification at both endpoints.",
+    }
+    return [unauthenticated, signed]
 
 
 def _plot(rows: list[dict[str, Any]], output: Path) -> None:
@@ -335,7 +386,7 @@ def run_comparison(repetitions: int, result_dir: Path, output_dir: Path) -> tupl
     rows = _classical_rows(repetitions)
     rows.extend(_mlkem_rows(repetitions))
     rows.extend(_bb84_rows(summary))
-    rows.append(_mitm_row())
+    rows.extend(_mitm_rows())
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "compare_key_establishment.csv"
     png_path = output_dir / "compare_key_establishment.png"

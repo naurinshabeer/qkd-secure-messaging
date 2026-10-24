@@ -20,7 +20,15 @@ class CompareKeyEstablishmentTests(unittest.TestCase):
             self.assertTrue(rows)
             self.assertTrue(any(row["method"] == "X25519 + HKDF (both sides)" for row in rows))
             self.assertTrue(any(row["parameter"] == "eve_fraction" and row["runs"] == "2" for row in rows))
-            self.assertTrue(any(row["method"] == "Unauthenticated X25519 MITM" for row in rows))
+            mitm_rows = {row["method"]: row for row in rows if row["category"] == "attacker_demo"}
+            unauthenticated = mitm_rows["Unauthenticated X25519 MITM"]
+            self.assertEqual(unauthenticated["alice_matches_bob"], "False")
+            self.assertEqual(unauthenticated["alice_matches_eve"], "True")
+            self.assertEqual(unauthenticated["bob_matches_eve"], "True")
+            self.assertIn("no detection", unauthenticated["handshake_result"])
+            signed = mitm_rows["Ed25519-signed X25519 MITM"]
+            self.assertEqual(signed["handshake_result"], "aborted")
+            self.assertIn("FAILED", signed["signature_verification"])
             self.assertGreater(png_path.stat().st_size, 0)
 
 
