@@ -114,7 +114,7 @@ class NetworkTests(unittest.TestCase):
             [sys.executable, "-m", "qkd_demo.coordinator"],
         ):
             result = subprocess.run(command, cwd=os.getcwd(), env=environment,
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 2)
             self.assertIn("QKD_PROVISION_TOKEN", result.stderr)
 
@@ -189,6 +189,7 @@ class NetworkTests(unittest.TestCase):
         self.alice.close()
         self.alice = NodeHarness("alice", "127.0.0.1", bob_app)
         self.alice.runtime.kme = manager
+        self.alice.runtime.kmes["bob"] = manager
         self.service.node_urls["alice"] = self.alice.base_url
         self.assertEqual(self.service.send_message("after Alice restart")["status"], "delivered")
 

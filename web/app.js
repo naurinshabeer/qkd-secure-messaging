@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 let toastTimer;
 let linkIsUp = true;
+let topologyMode = false;
 
 async function request(path, body) {
   const response = await fetch(path, body === undefined ? {} : {
@@ -24,6 +25,12 @@ function timeLabel(timestamp) { return new Date(timestamp * 1000).toLocaleTimeSt
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
 
 function render(state) {
+  if (state.topology) return renderTopology(state);
+  topologyMode = false;
+  $('topology-panel').hidden = true;
+  document.querySelector('.workspace').hidden = false;
+  document.querySelector('.operations').hidden = false;
+  document.querySelector('.page-heading').hidden = false;
   const up = state.link_up;
   linkIsUp = up;
   $('header-status').textContent = up ? 'Alice + Bob online' : 'Link or node unavailable';
@@ -83,6 +90,35 @@ function render(state) {
   refreshInbox(state.bob_inbox_url);
 }
 
+function renderTopology(state) {
+  topologyMode = true;
+  linkIsUp = state.links.some(link => link.up && link.pool_count > 0);
+  document.querySelector('.workspace').hidden = true;
+  document.querySelector('.operations').hidden = true;
+  document.querySelector('.page-heading').hidden = true;
+  $('topology-panel').hidden = false;
+  $('last-path').textContent = state.last_path ? `Last message: ${state.last_path.join(' → ')}` : 'No message path yet';
+  $('topology-links').innerHTML = state.links.map(link => `
+    <div class="topology-link"><b>${escapeHtml(link.a)} — ${escapeHtml(link.b)}</b>
+      <span>${link.distance_km} km · pool ${link.a_pool}/${link.b_pool} · QBER ${link.qber == null ? '—' : pct(link.qber)}</span>
+      <span>${link.up ? 'UP' : 'DOWN'}</span>
+      <button class="small-button ${link.up ? 'danger' : ''}" data-link="${escapeHtml(link.id)}" data-action="${link.up ? 'fail' : 'restore'}">${link.up ? 'Fail link' : 'Restore link'}</button>
+    </div>`).join('');
+  const available = state.links.filter(link => link.up).reduce((sum, link) => sum + link.pool_count, 0);
+  $('pool-number').textContent = String(available);
+  $('header-status').textContent = 'Alice, relays and Bob · localhost';
+  $('header-dot').style.background = 'var(--mint-strong)';
+  $('send-message').disabled = !available || !$('message').value.trim();
+  refreshInbox(state.bob_inbox_url);
+  $('topology-links').querySelectorAll('button[data-link]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const action = button.dataset.action;
+      try { render(await request(`/api/links/${encodeURIComponent(button.dataset.link)}/${action}`, {})); }
+      catch (error) { showError(error); }
+    });
+  });
+}
+
 async function refreshInbox(url) {
   if (!url) return;
   try {
@@ -101,6 +137,14 @@ $('eve').addEventListener('input', e => $('eve-output').textContent = `${e.targe
 $('message').addEventListener('input', e => {
   $('char-count').textContent = `${e.target.value.length.toLocaleString()} / 2,000`;
   $('send-message').disabled = !$('message').value.trim() || !Number($('pool-number').textContent) || !linkIsUp;
+});
+
+$('topology-generate').addEventListener('click', async () => {
+  try {
+    const result = await request('/api/keys/generate', {count: 24});
+    render(result.state);
+    notify(`${result.generated} keys provisioned across available links.`);
+  } catch (error) { showError(error); }
 });
 
 $('apply-settings').addEventListener('click', async () => {

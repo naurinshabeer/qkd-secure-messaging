@@ -1,52 +1,45 @@
 # Relay: SeQUeNCe QKD Network and Secure Messaging Prototype
 
-Relay is a computer-networks course prototype with separate Alice and Bob node processes. Each node owns an independent in-memory Key Management Entity (KME), exposes a small key-delivery REST API, and runs an application endpoint. A third coordinator runs the SeQUeNCe link simulation, provisions matching simulator key material to both KMEs, and serves the dashboard.
+Relay is a computer-networks course prototype with separate Alice, two trusted relay, and Bob node processes. Every node owns an in-memory KME for each neighbor, exposes a small key-delivery REST API, and runs a TCP application endpoint. A coordinator runs the SeQUeNCe link simulations, provisions each link independently, and serves the dashboard.
 
 > **Scope and security:** The quantum channel and authenticated classical provisioning relationship are simulated; no photons or QKD hardware are used. This project does not provide a finite-key security proof or privacy amplification and is not a real-world secure deployment. It is a teaching prototype; do not use it or its keys to protect real information.
 
 ## Architecture
 
 ```text
- Browser
-    │ HTTP dashboard/API :8765
-    ▼
- Link coordinator ───── runs SeQUeNCe BB84 + Cascade once
-    │                   creates one key_ID per matching key
-    ├──── HTTP provision same key_ID + material ────► Alice KME :8766
-    └──── HTTP provision same key_ID + material ────► Bob KME   :8767
-                                                           │
- Alice application ─── TCP AES-GCM frame ────────────────► Bob application :8769
-       │                                                       │
-       └── Alice KME REST :8766           Bob KME REST :8767 ──┘
+                    ┌── R1 ──┐
+Browser → Coordinator              Bob
+                    └── R2 ──┘
+             Four independently simulated links
+Alice → {A-R1, R1-B, A-R2, R2-B} → Bob
 ```
 
-The coordinator contains no application key pool. It temporarily holds SeQUeNCe output while provisioning it to both nodes. The TCP ACK contains only a status and a short HMAC confirmation, never plaintext. Decrypted messages remain in Bob's process and are exposed by `GET /api/node/inbox`; the dashboard labels this view “Bob's inbox”.
+Each edge has two independent KME pools (one at each endpoint), populated from a separate SeQUeNCe BB84 + Cascade run. For each matching key, the coordinator creates one ID and provisions identical ID/material to both ends. It does not have a shared application key pool. Alice creates an end-to-end key `K`; each relay decrypts and re-encrypts `K` with the two adjacent link keys. The relay is **trusted** and sees `K`. The application message is then encrypted end-to-end with `K` and sent to Bob over TCP.
 
-The coordinator simulates one quantum-link run in `qkd_demo/sequence_link.py`. It generates a single key ID for each matching key and posts the same ID/material pair to both KMEs. The coordinator also models the authenticated classical channel needed by BB84: provisioning requests use the shared pre-shared token. The node checks that token in constant time. These are software simulations; no photons travel between operating-system processes.
+The TCP acknowledgement contains only status and an HMAC confirmation, never plaintext. Bob keeps decrypted text in his process and exposes it from `GET /api/node/inbox`. The coordinator simulates both the quantum link and the authenticated classical provisioning channel BB84 requires. Provisioning uses a shared pre-shared token checked in constant time. No photons travel between processes.
 
 ## Project structure
 
 ```text
 app.py                         Dashboard/coordinator entry point
+config/topology.json           Node ports and per-link settings
 qkd_demo/sequence_link.py      SeQUeNCe BB84, Eve channel, Cascade experiment
 qkd_demo/key_manager.py        Per-node in-memory KME and single-use key state
-qkd_demo/node.py               Alice/Bob REST service and TCP application endpoint
+qkd_demo/node.py               Alice, relay, and Bob REST/TCP services
 qkd_demo/protocol.py           Bounded length-prefixed TCP frames
 qkd_demo/coordinator.py        Simulator orchestration, key provisioning, dashboard API
 web/                           Dashboard HTML, CSS and JavaScript
 docs/PROTOCOL.md               TCP wire format and examples
 tests/                         Simulator, KME, protocol and network integration tests
-Dockerfile
-docker-compose.yml
 ```
 
-There is no database. Keys and experiment state are in memory and disappear when their processes stop or reset. The coordinator only displays Alice's available pool and Bob's available count; key bytes never enter the browser response.
+There is no database. Keys and experiment state are in memory and disappear when their processes stop or reset. The dashboard shows each link's pool count and QBER; raw key bytes never enter browser responses.
 
 ## Key-delivery API
 
 The node REST API is inspired by **ETSI GS QKD 014** paths and field names. This project is **modelled on** the standard; it is not ETSI-compliant. It simplifies authentication, key batch negotiation, TLS, endpoint discovery, error schemas, and lifecycle handling. Both `GET` and `POST` are accepted for key retrieval to make the lab easy to exercise.
 
-The peer identifier is the remote node: Alice asks for `bob`; Bob asks for `alice`.
+The peer identifier is the neighbor on that particular physical/simulated link: for example, Alice asks for `r1`, while Relay 1 asks for `alice` on one KME and `bob` on its other KME.
 
 | Method and path | Result |
 |---|---|
@@ -60,13 +53,13 @@ Coordinator-to-KME provisioning uses `/api/node/import` and related internal KME
 
 ## TCP application protocol
 
-Alice's `/api/app/messages` endpoint requests a key from Alice's own REST KME, encrypts with AES-256-GCM, and opens a TCP connection to Bob. Bob's TCP handler parses a bounded frame, checks the link flag, requests the same key ID from Bob's KME, authenticates/decrypts the ciphertext, and returns an ACK or NACK. Alice's endpoint relays only Bob's authenticated status to the coordinator UI. If the ACK is lost or fails verification, Alice asks Bob for a signed, idempotent outcome by message ID before committing or releasing her reservation; an unknown outcome stays reserved until its 30-second expiry. Frame IDs, session ID, and sequence are covered by AES-GCM associated data. The UI reads decrypted text from Bob's labelled inbox endpoint. The wire layout and limits are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Alice's `/api/app/messages` endpoint chooses the route supplied by the coordinator, reserves a first-hop key, wraps a fresh end-to-end key in a type `0x06` TCP frame, and sends it to the first relay. Each relay unwraps the key and wraps it with its next-hop key. Hop keys are committed or released independently after authenticated ACK/outcome handling. Alice then encrypts the message end-to-end and sends it to Bob over TCP; Bob decrypts it using the relayed key and returns an ACK with no plaintext. Frame IDs, session ID, sequence, and route are authenticated as associated data. The UI reads decrypted text from Bob's labelled inbox endpoint. The wire layout and limits are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 TCP framing uses `recv_exact` and a maximum frame/payload size. Truncated, oversized, unsupported-version, and invalid-length frames are rejected without taking down the listener. Socket connect/read timeouts, unreachable peers, unknown key IDs, and GCM authentication failures are handled as error responses. The coordinator owns the single LinkState and serves `GET /api/link-state`. Nodes consult it before provisioning, reserving keys, or accepting message frames. This shared state is a software simulation of link availability.
 
-## Run locally on Windows (no Docker)
+## Run locally on Windows PowerShell
 
-Use Python 3.12. Create/install the project environment once:
+Install dependencies once (Python 3.12):
 
 ```powershell
 cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
@@ -74,63 +67,57 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Set the same token independently in all three PowerShell windows, then start each command in a separate window. Use a long random value for your local demo: `$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'`. Start Bob first:
+Set the same token in each terminal. Start five processes in five PowerShell windows. The coordinator needs to be up before the nodes because each node checks its shared link-state endpoint. Each node reads its own ports and neighbors from `config/topology.json`.
+
+**Terminal 1 — coordinator and dashboard:**
 
 ```powershell
 cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
 $env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
-.\.venv\Scripts\python.exe -m qkd_demo.node --role bob --host 127.0.0.1 --port 8767 --app-port 8769 --coordinator http://127.0.0.1:8765
+.\.venv\Scripts\python.exe -m qkd_demo.coordinator --host 127.0.0.1 --port 8765 --topology config/topology.json
 ```
 
-Then Alice; `--peer` points to Bob's TCP application port:
+**Terminal 2 — Alice:**
 
 ```powershell
 cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
 $env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
-.\.venv\Scripts\python.exe -m qkd_demo.node --role alice --host 127.0.0.1 --port 8766 --app-port 8768 --peer 127.0.0.1:8769 --coordinator http://127.0.0.1:8765
+.\.venv\Scripts\python.exe -m qkd_demo.node --role alice --node-id alice --topology config/topology.json --coordinator http://127.0.0.1:8765
 ```
 
-Then the link simulator, coordinator, and dashboard:
+**Terminal 3 — Relay 1:**
 
 ```powershell
 cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
 $env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
-.\.venv\Scripts\python.exe -m qkd_demo.coordinator --host 127.0.0.1 --port 8765 --alice http://127.0.0.1:8766 --bob http://127.0.0.1:8767
+.\.venv\Scripts\python.exe -m qkd_demo.node --role relay --node-id r1 --topology config/topology.json --coordinator http://127.0.0.1:8765
 ```
 
-Open `http://127.0.0.1:8765` in a browser on the same computer. Stop each process with Ctrl+C in its own terminal. Every process is restricted to `127.0.0.1`. Both node and coordinator refuse startup without the token unless `--insecure-dev` is explicitly passed. The coordinator must be running before the nodes can provision or deliver messages because each node checks its `/api/link-state` endpoint. Use the same token in every window. `--insecure-dev` is for a completely isolated local experiment only and must be passed to each process.
-
-### Manual REST checks
-
-With the three processes running, inspect status without retrieving any key:
+**Terminal 4 — Relay 2:**
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8766/api/v1/keys/bob/status
-Invoke-RestMethod http://127.0.0.1:8767/api/v1/keys/alice/status
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role relay --node-id r2 --topology config/topology.json --coordinator http://127.0.0.1:8765
 ```
 
-Generate keys through the dashboard, or POST `{"count":2}` to `http://127.0.0.1:8765/api/keys/generate`. The coordinator simulates one link run and provisions up to the requested count to both KMEs with shared IDs.
-
-## Docker deployment and packet capture
-
-Docker Compose creates three services on the user-defined bridge network `qkd-lab-net`. Dashboard and node API/application ports are published to localhost for access and capture.
+**Terminal 5 — Bob:**
 
 ```powershell
-docker compose up --build
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role bob --node-id bob --topology config/topology.json --coordinator http://127.0.0.1:8765
 ```
 
-Open `http://127.0.0.1:8765`; stop with Ctrl+C, or in another terminal run `docker compose down`. For packet capture, select the Docker/WSL bridge interface used by your Docker Desktop backend; interface names and host visibility vary by Windows/Docker version. The Alice-to-Bob TCP application frame contains AES-GCM ciphertext. **
+Open `http://127.0.0.1:8765`. Stop each process with Ctrl+C. All services bind only to `127.0.0.1`. The coordinator provisions keys independently on every link that is up; use **Provision SeQUeNCe keys** and send a message. The dashboard shows each link's distance, QBER, matching pool count, state, and failure/restore controls. It reports the selected path with each successful message. A path is eligible only when every hop is up and both endpoint pools have a key; among eligible paths the shortest total distance wins.
+
+### Topology configuration
+
+`config/topology.json` contains a `nodes` object with each node's role and localhost HTTP/TCP ports, plus a `links` array. Each link needs a unique `id`, endpoint node IDs `a` and `b`, `distance_km`, `noise`, and `eve` (intercept fraction); `up` sets its initial simulated state. Coordinator provisions a separate SeQUeNCe run and matching key IDs/material for each configured link. Current path selection supports the two configured alternatives Alice–R1–Bob and Alice–R2–Bob.
 
 ## Dashboard walkthrough
 
-1. Start Bob, Alice, and the coordinator. The dashboard should report both nodes online and show two separate pool counts.
-2. Leave the default 10 km, 1% noise, and 0% Eve settings. Click **Apply settings**, then **Run SeQUeNCe experiment**.
-3. Inspect measured mean QBER, matching Cascade keys, decision, and Cascade rate estimate. The coordinator creates one ID for each imported key and sends the same ID/key pair to both KMEs. Compare Alice and Bob pool counts.
-4. Send a short Alice message. Alice consumes her KME copy, sends ciphertext over TCP, and Bob consumes his matching copy and decrypts it. The receipt shown in the UI comes back from Bob's TCP handler. Both available counts decrease by one.
-5. Set Eve interception to 100%, apply, and run another simulation. Intercept-resend can raise QBER and trigger the simplified 11% teaching cutoff. Results are stochastic; repeat a run if measurements do not show the expected trend.
-6. Increase noise or distance, run again, and compare measured results. The controls are simulator parameters; do not claim calibrated fibre measurements.
-7. Use **Simulate link failure** and try sending. Both node application endpoints are told to reject traffic; **Restore link** re-enables them.
-8. Consume remaining keys to demonstrate the empty-pool conflict. **Reset session** clears both KME pools and resets the coordinator.
+Use **Provision SeQUeNCe keys** to run a separate simulation for each available link. The four rows show link state, distance, QBER, and the usable pool count on both sides. Fail either edge of the shorter route; the next send should use the other relay. Fail all four edges to see the unavailable-path response. Empty one path's link pool on both ends to demonstrate pool-based failover. Send a short message and inspect **Last message** for the route. Bob's inbox shows the decrypted message from Bob's own node.
 
 ## Tests
 
@@ -140,8 +127,8 @@ Run from this directory:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Tests use a deterministic SeQUeNCe stub for fast orchestration checks and real fixed-seed SeQUeNCe tests for clean/Eve behavior. Network tests start ephemeral localhost node services and cover shared key IDs/material, single-use APIs, unknown IDs/peers, partial reads, truncated/oversized frames, tampered ciphertext, end-to-end Alice→Bob messaging, link-down, peer failure, and empty pools.
+Tests use deterministic SeQUeNCe stubs for fast orchestration checks. Relay tests cover per-link key sync, end-to-end key equality, tampered relay frames, route selection/failover, both paths down, and relay failure mid-transport. One real-SeQUeNCe relay end-to-end test is marked slow and runs only when `QKD_RUN_SLOW_TESTS=1`.
 
 ## Course-project scope and remaining work
 
-This milestone demonstrates separate network processes, REST key delivery, TCP framing, per-node key state, simulation-backed key provisioning, and UI-mediated end-to-end message delivery. It does not implement a trusted relay for multi-hop paths, privacy amplification, a real authenticated classical channel, persistent key storage, production KME authentication, or statistical experiment sweeps. It does not claim real-world security.
+This milestone demonstrates separate localhost processes, per-neighbor KMEs, four independently simulated link pools, hop-by-hop key transport, and failover between two trusted-relay paths. The relays are trusted and see the end-to-end key. The quantum and authenticated classical channels are simulations; there is no photon hardware, privacy amplification, finite-key analysis, persistent KME state, or experiment sweep. It does not claim real-world security.

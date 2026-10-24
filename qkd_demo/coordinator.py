@@ -10,7 +10,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 from qkd_demo.node import json_request
 from qkd_demo.sequence_link import LinkSettings, run_sequence_bb84
@@ -18,6 +18,27 @@ from qkd_demo.sequence_link import LinkSettings, run_sequence_bb84
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 POOL_LIMIT = 24
 QBER_LIMIT = 0.11
+
+
+def enumerate_paths(topology: dict[str, Any], source: str = "alice", target: str = "bob") -> list[list[str]]:
+    """Enumerate simple node paths from Alice to Bob from the configured links."""
+    graph: dict[str, list[str]] = {node_id: [] for node_id in topology["nodes"]}
+    for link in topology["links"]:
+        graph[link["a"]].append(link["b"])
+        graph[link["b"]].append(link["a"])
+    paths: list[list[str]] = []
+
+    def walk(node_id: str, path: list[str]) -> None:
+        if node_id == target:
+            paths.append(path)
+            return
+        for neighbor in graph.get(node_id, []):
+            if neighbor not in path:
+                walk(neighbor, path + [neighbor])
+
+    if source in graph and target in graph:
+        walk(source, [source])
+    return paths
 
 
 class CoordinatorError(Exception):
@@ -28,30 +49,50 @@ class CoordinatorError(Exception):
 
 class LinkState:
     """Coordinator-owned switch for the simulated Alice-Bob classical/quantum link."""
-    def __init__(self, up: bool = True):
+    def __init__(self, up: bool = True, links: dict[str, bool] | None = None):
         self._up = up
+        self._links = dict(links or {})
         self._lock = threading.Lock()
 
-    def get(self) -> bool:
+    def get(self, link_id: str | None = None) -> bool:
         with self._lock:
-            return self._up
+            return self._links.get(link_id, self._up) if link_id else self._up
 
-    def set(self, up: bool) -> None:
+    def set(self, up: bool, link_id: str | None = None) -> None:
         with self._lock:
-            self._up = up
+            if link_id:
+                self._links[link_id] = up
+            else:
+                self._up = up
 
 
 class CoordinatorService:
     """Owns experiment metadata only; Alice and Bob retain separate KME pools."""
 
-    def __init__(self, alice_url: str, bob_url: str):
-        self.node_urls = {"alice": alice_url.rstrip("/"), "bob": bob_url.rstrip("/")}
+    def __init__(self, alice_url: str, bob_url: str, topology: dict[str, Any] | None = None):
+        self.topology = topology
+        if topology:
+            self.node_urls = {node_id: f"http://127.0.0.1:{int(node['http_port'])}"
+                              for node_id, node in topology["nodes"].items()}
+            links = topology["links"]
+            self.paths = enumerate_paths(topology)
+            self.link_settings = {item["id"]: LinkSettings(float(item["distance_km"]),
+                                  float(item.get("eve", 0.0)), float(item.get("noise", 0.01))) for item in links}
+            self.link_state = LinkState(True, {item["id"]: bool(item.get("up", True)) for item in links})
+            self.link_results: dict[str, dict[str, Any]] = {}
+        else:
+            self.node_urls = {"alice": alice_url.rstrip("/"), "bob": bob_url.rstrip("/")}
+            self.paths = []
+            self.link_settings = {}
+            self.link_results = {}
         self.settings = LinkSettings()
-        self.link_state = LinkState(True)
+        if not topology:
+            self.link_state = LinkState(True)
         self.last_run: dict[str, Any] | None = None
         self.events: list[dict[str, Any]] = []
         self.sent_count = 0
         self.blocked_count = 0
+        self.last_path: list[str] | None = None
         self.started_at = time.time()
         self._lock = threading.RLock()
         self._event("Coordinator ready · independent Alice and Bob nodes", "info")
@@ -107,6 +148,8 @@ class CoordinatorService:
     def generate(self, requested_count: int = POOL_LIMIT) -> dict[str, Any]:
         if not isinstance(requested_count, int) or not 1 <= requested_count <= POOL_LIMIT:
             raise ValueError(f"Import count must be between 1 and {POOL_LIMIT}.")
+        if self.topology:
+            return self._generate_topology(requested_count)
         with self._lock:
             if not self.link_up:
                 raise CoordinatorError(503, "Simulated link is down.")
@@ -155,8 +198,50 @@ class CoordinatorService:
             return {"generated": len(rows), "available_from_experiment": len(materials),
                     "state": self.state()}
 
-    def set_link(self, up: bool) -> dict[str, Any]:
+    def _generate_topology(self, requested_count: int) -> dict[str, Any]:
+        total = 0
         with self._lock:
+            for link in self.topology["links"]:
+                link_id, left, right = link["id"], link["a"], link["b"]
+                if not self.link_state.get(link_id):
+                    continue
+                left_inv = self._node(left, "/api/node/keys?peer_id=" + right)
+                right_inv = self._node(right, "/api/node/keys?peer_id=" + left)
+                room = min(POOL_LIMIT - left_inv["total_key_count"],
+                           POOL_LIMIT - right_inv["total_key_count"], requested_count)
+                if room <= 0:
+                    continue
+                result = run_sequence_bb84(self.link_settings[link_id])
+                materials = result.pop("key_materials")
+                accepted = bool(result["accepted"] and result["qber"] < QBER_LIMIT)
+                selected = materials[:room] if accepted else []
+                rows = [{"key_ID": f"{link_id}-" + uuid.uuid4().hex.upper(),
+                         "key": base64.b64encode(key).decode("ascii")} for key in selected]
+                if rows:
+                    try:
+                        self._node(left, "/api/node/import", "POST", {"peer_id": right, "keys": rows})
+                        self._node(right, "/api/node/import", "POST", {"peer_id": left, "keys": rows})
+                    except CoordinatorError:
+                        ids = [row["key_ID"] for row in rows]
+                        for node_id, peer in ((left, right), (right, left)):
+                            try: self._node(node_id, "/api/node/remove", "POST", {"peer_id": peer, "key_IDs": ids})
+                            except CoordinatorError: pass
+                        raise
+                result.update({"accepted": accepted, "pool_added": len(rows), "link_id": link_id})
+                self.link_results[link_id] = result
+                total += len(rows)
+                self._event(f"{link_id}: {len(rows)} matching key(s) provisioned · QBER {result['qber']:.2%}",
+                            "success" if rows else "warning")
+            return {"generated": total, "state": self.state()}
+
+    def set_link(self, up: bool, link_id: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            if self.topology:
+                if link_id not in self.link_settings:
+                    raise CoordinatorError(404, "Unknown topology link.")
+                self.link_state.set(up, link_id)
+                self._event(f"{link_id} restored" if up else f"{link_id} failed", "success" if up else "warning")
+                return self.state()
             self.link_state.set(up)
             results: list[dict[str, Any]] = []
             errors: list[str] = []
@@ -173,6 +258,32 @@ class CoordinatorService:
             return self.state()
 
     def send_message(self, message: str) -> dict[str, Any]:
+        if self.topology:
+            candidates = []
+            for path in self.paths:
+                links = [self._link_between(a, b) for a, b in zip(path, path[1:])]
+                if all(self.link_state.get(link["id"]) for link in links):
+                    counts = [min(self._node(a, "/api/node/keys?peer_id=" + b)["count"],
+                                  self._node(b, "/api/node/keys?peer_id=" + a)["count"])
+                              for a, b in zip(path, path[1:])]
+                    if all(counts):
+                        candidates.append((sum(float(link["distance_km"]) for link in links), path, links))
+            if not candidates:
+                self.blocked_count += 1
+                raise CoordinatorError(503, "Both Alice-to-Bob relay paths are unavailable (link down or empty pool).")
+            _, path, links = min(candidates, key=lambda item: item[0])
+            self.last_path = path
+            try:
+                result = self._node("alice", "/api/app/messages", "POST", {"text": message, "path": path})
+                self.sent_count += 1
+                result["path"] = path
+                self.last_path = path
+                self._event("Message delivered via " + " → ".join(path), "success")
+                return result
+            except CoordinatorError as exc:
+                self.blocked_count += 1
+                self._event("Message failed via " + " → ".join(path) + " · " + str(exc)[:70], "warning")
+                raise
         if not self.link_up:
             self.blocked_count += 1
             raise CoordinatorError(503, "Simulated inter-node link is down.")
@@ -189,7 +300,8 @@ class CoordinatorService:
     def reset(self) -> dict[str, Any]:
         with self._lock:
             errors = []
-            for role in ("alice", "bob"):
+            node_ids = list(self.node_urls) if self.topology else ["alice", "bob"]
+            for role in node_ids:
                 try:
                     self._node(role, "/api/node/reset", "POST", {})
                 except CoordinatorError as exc:
@@ -198,6 +310,9 @@ class CoordinatorService:
                 raise CoordinatorError(503, "; ".join(errors))
             self.settings = LinkSettings()
             self.link_up = True
+            if self.topology:
+                for link_id in self.link_settings:
+                    self.link_state.set(True, link_id)
             self.last_run = None
             self.events.clear()
             self.sent_count = self.blocked_count = 0
@@ -207,6 +322,26 @@ class CoordinatorService:
 
     def state(self) -> dict[str, Any]:
         with self._lock:
+            if self.topology:
+                rendered = []
+                for link in self.topology["links"]:
+                    left, right, link_id = link["a"], link["b"], link["id"]
+                    try:
+                        left_count = self._node(left, "/api/node/keys?peer_id=" + right)["count"]
+                        right_count = self._node(right, "/api/node/keys?peer_id=" + left)["count"]
+                    except CoordinatorError:
+                        left_count = right_count = 0
+                    metrics = self.link_results.get(link_id, {})
+                    rendered.append({"id": link_id, "a": left, "b": right,
+                        "distance_km": float(link["distance_km"]), "noise": float(link.get("noise", 0.01)),
+                        "eve": float(link.get("eve", 0.0)), "up": self.link_state.get(link_id),
+                        "a_pool": left_count, "b_pool": right_count,
+                        "pool_count": min(left_count, right_count), "qber": metrics.get("qber")})
+                return {"topology": True, "links": rendered, "paths": self.paths,
+                        "last_path": self.last_path,
+                        "sent_count": self.sent_count, "blocked_count": self.blocked_count,
+                        "events": list(self.events), "simulator": "SeQUeNCe",
+                        "bob_inbox_url": self.node_urls["bob"] + "/api/node/inbox"}
             try:
                 alice = self._node("alice", "/api/node/keys")
                 alice_online = True
@@ -234,6 +369,9 @@ class CoordinatorService:
                 "key_bytes": 32, "qber_limit": QBER_LIMIT, "simulator": "SeQUeNCe",
                 "bob_inbox_url": self.node_urls["bob"] + "/api/node/inbox",
             }
+
+    def _link_between(self, a: str, b: str) -> dict[str, Any]:
+        return next(link for link in self.topology["links"] if {link["a"], link["b"]} == {a, b})
 
 
 class CoordinatorHTTPServer(ThreadingHTTPServer):
@@ -279,8 +417,9 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path == "/api/link-state":
-            return self._send(200, {"up": self.server.service.link_up,
-                                    "label": "simulated shared link state"})
+            link_id = parse_qs(urlsplit(self.path).query).get("link_id", [None])[0]
+            return self._send(200, {"up": self.server.service.link_state.get(link_id),
+                                    "label": "simulated shared link state", "link_id": link_id})
         if path == "/api/state":
             try:
                 return self._send(200, self.server.service.state())
@@ -316,6 +455,10 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
                 result = service.set_link(False)
             elif path == "/api/link/restore":
                 result = service.set_link(True)
+            elif path.startswith("/api/links/") and path.endswith("/fail"):
+                result = service.set_link(False, path.split("/")[3])
+            elif path.startswith("/api/links/") and path.endswith("/restore"):
+                result = service.set_link(True, path.split("/")[3])
             elif path == "/api/reset":
                 result = service.reset()
             else:
@@ -338,6 +481,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=int(os.getenv("COORDINATOR_PORT", "8765")))
     parser.add_argument("--alice", default=os.getenv("ALICE_URL", "http://127.0.0.1:8766"))
     parser.add_argument("--bob", default=os.getenv("BOB_URL", "http://127.0.0.1:8767"))
+    parser.add_argument("--topology", default="config/topology.json", help="Topology JSON configuration.")
     parser.add_argument("--insecure-dev", action="store_true", help="Allow startup without QKD_PROVISION_TOKEN for isolated development only.")
     args = parser.parse_args()
     if args.host != "127.0.0.1":
@@ -346,7 +490,14 @@ def main() -> None:
         parser.error("Alice and Bob must be on 127.0.0.1.")
     if not os.getenv("QKD_PROVISION_TOKEN") and not args.insecure_dev:
         parser.error("Set QKD_PROVISION_TOKEN or pass --insecure-dev.")
-    server = CoordinatorHTTPServer((args.host, args.port), CoordinatorService(args.alice, args.bob))
+    topology = None
+    topology_file = Path(args.topology)
+    if topology_file.is_file():
+        try:
+            topology = json.loads(topology_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            parser.error(f"Could not read topology JSON: {exc}")
+    server = CoordinatorHTTPServer((args.host, args.port), CoordinatorService(args.alice, args.bob, topology))
     print(f"Coordinator and dashboard listening at http://{args.host}:{args.port}")
     try:
         server.serve_forever()

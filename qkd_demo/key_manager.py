@@ -91,6 +91,16 @@ class KeyManager:
         with self._lock:
             return list(self._keys)
 
+    def available_count(self) -> int:
+        with self._lock:
+            self._expire_reservations()
+            return sum(record.reservation is None for record in self._keys.values())
+
+    def available_key_ids(self) -> list[str]:
+        with self._lock:
+            self._expire_reservations()
+            return [key_id for key_id, record in self._keys.items() if record.reservation is None]
+
     def total_count(self) -> int:
         with self._lock:
             return len(self._keys)
