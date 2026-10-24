@@ -278,11 +278,18 @@ def _plot(rows: list[dict[str, Any]], output: Path) -> None:
     axes[0, 0].grid(axis="x", alpha=.2)
 
     byte_rows = [row for row in classical if row["bytes_on_wire"] != ""]
-    axes[0, 1].barh([row["method"].replace(" (both sides)", "") for row in byte_rows],
-                    [int(row["bytes_on_wire"]) for row in byte_rows], color="#657da3")
+    byte_values = [int(row["bytes_on_wire"]) for row in byte_rows]
+    byte_bars = axes[0, 1].barh([row["method"].replace(" (both sides)", "") for row in byte_rows],
+                                byte_values, color="#657da3")
+    for bar, value in zip(byte_bars, byte_values):
+        axes[0, 1].annotate(f"{value} B", (value, bar.get_y() + bar.get_height() / 2),
+                            xytext=(4, 0), textcoords="offset points", va="center", fontsize=8)
+    axes[0, 1].margins(x=.18)
     axes[0, 1].set_title("Raw wire bytes per exchange · measured here", fontsize=12)
     axes[0, 1].set_xlabel("Bytes (protocol framing and TLS excluded)")
     axes[0, 1].grid(axis="x", alpha=.2)
+    axes[0, 1].text(.01, .01, "RSA public key (294 B DER) is a separate one-time cost, not included.",
+                    transform=axes[0, 1].transAxes, fontsize=7, va="bottom")
 
     if distance:
         axes[1, 0].plot([float(row["parameter_value"]) for row in distance],
