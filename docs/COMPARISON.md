@@ -17,7 +17,7 @@ For a quick smoke run (five classical repetitions):
 .\.venv\Scripts\python.exe experiments\compare_key_establishment.py --quick --out experiments\results
 ```
 
-The script reads the existing `experiments\results\summary.csv` and writes `compare_key_establishment.csv` and `compare_key_establishment.png` in the output folder. The PNG is produced with the optional `matplotlib` dependency from `requirements-experiments.txt`. ML-KEM is checked at runtime; no dependency is installed. The installed `cryptography` library did not expose a usable ML-KEM API in the run recorded here, so it is listed as **not measured here**.
+The script reads the existing `experiments\results\summary.csv` and writes `compare_key_establishment.csv` and `compare_key_establishment.png` in the output folder. The PNG is produced with the optional `matplotlib` dependency from `requirements-experiments.txt`. ML-KEM is checked at runtime; no dependency is installed. It was checked here with `cryptography` version **47.0.0**. It was **not measured here; availability depends on the installed cryptography version**.
 
 ## Measurement definitions
 
