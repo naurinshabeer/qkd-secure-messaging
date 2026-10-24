@@ -6,6 +6,8 @@ import argparse
 import csv
 import json
 import socket
+import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -20,6 +22,9 @@ QBER_CUTOFF = 0.11
 DEFAULT_EVE_FRACTION = 0.75
 # Allow synchronous SeQUeNCe key provisioning to finish on slower machines.
 GENERATE_TIMEOUT = 900
+INITIAL_STATE_RETRY_WINDOW = 120
+INITIAL_STATE_RETRY_INTERVAL = 2
+INITIAL_STATE_REQUEST_TIMEOUT = 8
 LINKS = ("A-R1", "R1-B", "A-R2", "R2-B")
 SCENARIOS = (
     ("clear", ()),
@@ -43,6 +48,52 @@ def post_json(base_url: str, path: str, payload: dict[str, Any], timeout: float 
 def get_json(base_url: str, path: str, timeout: float = 8) -> dict[str, Any]:
     with urllib.request.urlopen(base_url.rstrip("/") + path, timeout=timeout) as response:
         return json.loads(response.read())
+
+
+def _is_retryable_initial_state_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 503
+    reason = getattr(exc, "reason", None)
+    return isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(reason, (TimeoutError, socket.timeout))
+
+
+def _get_initial_state(base_url: str) -> dict[str, Any]:
+    deadline = time.monotonic() + INITIAL_STATE_RETRY_WINDOW
+    last_error: Exception | None = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            return get_json(base_url, "/api/state",
+                            timeout=min(INITIAL_STATE_REQUEST_TIMEOUT, remaining))
+        except ValueError as exc:
+            raise classify_http_failure(exc, base_url) from exc
+        except (OSError, urllib.error.URLError) as exc:
+            if not _is_retryable_initial_state_error(exc):
+                raise classify_http_failure(exc, base_url) from exc
+            last_error = exc
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(INITIAL_STATE_RETRY_INTERVAL, remaining))
+    detail = classify_http_failure(last_error, base_url) if last_error else "No response was received."
+    raise RuntimeError(f"Coordinator did not provide initial /api/state within {INITIAL_STATE_RETRY_WINDOW} seconds. It may still be generating keys. Details: {detail}")
+
+
+def _restore_link_settings(base_url: str, links: list[dict[str, Any]]) -> list[str]:
+    errors = []
+    for link in links:
+        link_id = link.get("id", "<unknown>")
+        try:
+            post_json(base_url, f"/api/links/{link_id}/settings", {
+                "distance_km": link["distance_km"],
+                "channel_noise": link["noise"],
+                "eve_fraction": link["eve_fraction"] if "eve_fraction" in link else link["eve"],
+            })
+        except Exception as exc:
+            errors.append(f"{link_id}: {exc}")
+    return errors
 
 
 def classify_http_failure(exc: Exception, base_url: str) -> RuntimeError:
@@ -132,10 +183,7 @@ def _shortest(paths: list[list[str]], link_by_id: dict[str, dict[str, Any]], blo
 
 def run_scenario(base_url: str, output: Path, messages: int, eve_fraction: float,
                  scenarios: tuple[tuple[str, tuple[str, ...]], ...] = SCENARIOS) -> list[dict[str, Any]]:
-    try:
-        initial = get_json(base_url, "/api/state")
-    except (OSError, ValueError, urllib.error.URLError) as exc:
-        raise classify_http_failure(exc, base_url) from exc
+    initial = _get_initial_state(base_url)
     if not initial.get("topology"):
         raise RuntimeError("Coordinator responded but does not expose the relay topology API.")
     paths = initial.get("paths", [])
@@ -234,6 +282,15 @@ def run_scenario(base_url: str, output: Path, messages: int, eve_fraction: float
                             for link_id in LINKS for field in ("qber", "accepted", "pool_count")}})
     except (OSError, ValueError, urllib.error.URLError, KeyError) as exc:
         raise classify_http_failure(exc, base_url) from exc
+    finally:
+        restore_errors = _restore_link_settings(base_url, initial.get("links", []))
+        if restore_errors:
+            restoration_failure = RuntimeError("Could not restore original link settings: " + "; ".join(restore_errors))
+            active_error = sys.exc_info()[1]
+            if active_error is not None:
+                active_error.add_note(str(restoration_failure))
+            else:
+                raise restoration_failure
     output.mkdir(parents=True, exist_ok=True)
     csv_path = output / "moving_eve.csv"
     columns = ["record_type", "round", "scenario", "eve_links", "eve_fraction", "qkd_paths",
@@ -259,8 +316,8 @@ def _plot(rows: list[dict[str, Any]], destination: Path) -> None:
         raise RuntimeError("The timeline PNG requires optional matplotlib. Install requirements-experiments.txt.") from exc
     rounds = [row for row in rows if row["record_type"] == "round"]
     labels = [str(row["round"]) for row in rounds]
-    fig, (qber_ax, path_ax, count_ax) = plt.subplots(3, 1, figsize=(11, 9), constrained_layout=True,
-                                                      gridspec_kw={"height_ratios": [1.2, .75, 1]})
+    fig, (qber_ax, path_ax, count_ax) = plt.subplots(3, 1, figsize=(11, 8),
+                                                      gridspec_kw={"height_ratios": [1.2, .12, 1.25]})
     for link_id in LINKS:
         qber_ax.plot(labels, [float(row[f"{link_id}_qber"] or 0) * 100 for row in rounds], marker="o", label=link_id)
     qber_ax.axhline(QBER_CUTOFF * 100, color="black", linestyle="--", linewidth=1, label="11% cutoff")
@@ -269,10 +326,10 @@ def _plot(rows: list[dict[str, Any]], destination: Path) -> None:
     qber_ax.legend(ncol=5, fontsize=8)
     qber_ax.grid(alpha=.2)
     path_ax.axis("off")
-    path_ax.set_title("QKD path used per round")
+    path_ax.set_title("QKD path used per round", pad=1, fontsize=9)
     for index, row in enumerate(rounds):
         path_ax.text(index / max(1, len(rounds) - 1), .5, f"{row['round']}: {row['qkd_paths']}",
-                     ha="center", va="center", fontsize=8, transform=path_ax.transAxes)
+                     ha="center", va="center", fontsize=6.5, transform=path_ax.transAxes)
     x = list(range(len(rounds)))
     width = .24
     for offset, (prefix, label, color) in enumerate((
@@ -288,8 +345,11 @@ def _plot(rows: list[dict[str, Any]], destination: Path) -> None:
     count_ax.set_xticks(x, labels)
     count_ax.set_xlabel("Scenario round")
     count_ax.set_ylabel("Messages")
-    count_ax.legend(ncol=3, fontsize=7)
+    handles, legend_labels = count_ax.get_legend_handles_labels()
     count_ax.grid(axis="y", alpha=.18)
+    fig.legend(handles, legend_labels, loc="lower center", bbox_to_anchor=(.5, .01),
+               ncol=3, fontsize=7)
+    fig.tight_layout(rect=(0, .07, 1, 1), h_pad=.45)
     fig.savefig(destination, dpi=150)
     plt.close(fig)
 
