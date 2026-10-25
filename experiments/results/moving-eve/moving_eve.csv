@@ -1,0 +1,13 @@
+record_type,round,scenario,eve_links,eve_fraction,qkd_paths,qkd_delivered,qkd_blocked,qkd_exposed,classical_unauth_path,classical_unauth_delivered,classical_unauth_blocked,classical_unauth_exposed,classical_auth_path,classical_auth_delivered,classical_auth_blocked,classical_auth_exposed,A-R1_qber,A-R1_accepted,A-R1_pool_count,R1-B_qber,R1-B_accepted,R1-B_pool_count,A-R2_qber,A-R2_accepted,A-R2_pool_count,R2-B_qber,R2-B_accepted,R2-B_pool_count
+round,0,clear,,0.75,alice>r1>bob,5,0,0,alice>r1>bob,5,0,0,alice>r1>bob,5,0,0,0.015197265625000001,True,19,0.016080078125,True,19,0.015116015625,True,24,0.0153671875,True,24
+round,1,eve_a_r1,A-R1,0.75,alice>r2>bob,5,0,0,alice>r1>bob,5,0,5,alice>r2>bob,5,0,0,0.19394140625,False,0,0.013992968750000001,True,24,0.0140671875,True,19,0.014984765625,True,19
+round,2,eve_r2_b,R2-B,0.75,alice>r1>bob,5,0,0,alice>r1>bob,5,0,0,alice>r1>bob,5,0,0,0.013737109375,True,19,0.014216015625,True,19,0.015230078125,True,24,0.18913671875,False,0
+round,3,eve_blocks_both_routes,A-R1;R2-B,0.75,blocked,0,5,0,alice>r1>bob,5,0,5,blocked,0,5,0,0.19221640625,False,0,0.014758984374999999,True,24,0.01551484375,True,24,0.1987453125,False,0
+round,4,eve_r1_b,R1-B,0.75,alice>r2>bob,5,0,0,alice>r1>bob,5,0,5,alice>r2>bob,5,0,0,0.01441953125,True,24,0.19517890625,False,0,0.015254296875,True,19,0.014108984375000001,True,19
+round,5,eve_a_r2,A-R2,0.75,alice>r1>bob,5,0,0,alice>r1>bob,5,0,0,alice>r1>bob,5,0,0,0.0148671875,True,19,0.0147171875,True,19,0.196536328125,False,0,0.013834765624999999,True,24
+round,6,eve_gone,,0.75,alice>r1>bob,5,0,0,alice>r1>bob,5,0,0,alice>r1>bob,5,0,0,0.0148671875,True,19,0.013855859375,True,19,0.01409765625,True,24,0.015818359375,True,24
+intercept_sweep,7,intercept_fraction,A-R1,0.1,,0,0,0,,0,0,0,,0,0,0,0.03898828125,True,24,0.013530078125000001,True,24,0.01514765625,True,24,0.014775390624999999,True,24
+intercept_sweep,8,intercept_fraction,A-R1,0.25,,0,0,0,,0,0,0,,0,0,0,0.07638710937500001,True,24,0.015508984375,True,24,0.0160078125,True,24,0.01460234375,True,24
+intercept_sweep,9,intercept_fraction,A-R1,0.5,,0,0,0,,0,0,0,,0,0,0,0.133881640625,False,0,0.0152625,True,24,0.014470703125000001,True,24,0.01426953125,True,24
+intercept_sweep,10,intercept_fraction,A-R1,0.75,,0,0,0,,0,0,0,,0,0,0,0.19817265625,False,0,0.014646484375000001,True,24,0.013734765625,True,24,0.0138125,True,24
+intercept_sweep,11,intercept_fraction,A-R1,1.0,,0,0,0,,0,0,0,,0,0,0,0.252675,False,0,0.01344296875,True,24,0.014595312499999999,True,24,0.01290234375,True,24
