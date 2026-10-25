@@ -130,3 +130,83 @@ Tests use deterministic SeQUeNCe stubs for fast orchestration checks. Relay test
 ## Scope and remaining work
 
 The system uses separate localhost processes, per-neighbor KMEs, four independent link pools, hop-by-hop key transport, and failover between two trusted-relay paths. The relays are trusted and see the end-to-end key. There is no privacy amplification, finite-key analysis, persistent KME state, or experiment sweep.
+
+## Larger live topology (6 nodes)
+
+`config/topology_6node.json` is an optional six-node, eight-link network with Alice, Bob, and four relays. It provides six candidate Alice-to-Bob routes, including routes that pass through multiple relays in sequence. The existing `config/topology.json` remains the default four-node configuration.
+
+### Start with the PowerShell launcher
+
+From the project root, pass a shared provisioning token. The launcher opens the coordinator first, then one PowerShell window for each node in the selected topology:
+
+```powershell
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$token = 'replace-with-a-long-random-local-token'
+.\scripts\start_network.ps1 -Topology config\topology_6node.json -Token $token
+```
+
+Open the printed dashboard URL, `http://127.0.0.1:8765`. To stop only this project's coordinator and node processes:
+
+```powershell
+.\scripts\stop_network.ps1
+```
+
+### Start manually in separate PowerShell windows
+
+Use the same project directory and token in every window. Start the coordinator first.
+
+**Window 1 — coordinator:**
+
+```powershell
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.coordinator --host 127.0.0.1 --port 8765 --topology config\topology_6node.json
+```
+
+**Windows 2–7 — Alice, four relays, and Bob:**
+
+```powershell
+# Alice
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role alice --node-id alice --topology config\topology_6node.json --coordinator http://127.0.0.1:8765
+```
+
+```powershell
+# Relay 1
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role relay --node-id r1 --topology config\topology_6node.json --coordinator http://127.0.0.1:8765
+```
+
+```powershell
+# Relay 2
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role relay --node-id r2 --topology config\topology_6node.json --coordinator http://127.0.0.1:8765
+```
+
+```powershell
+# Relay 3
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role relay --node-id r3 --topology config\topology_6node.json --coordinator http://127.0.0.1:8765
+```
+
+```powershell
+# Relay 4
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role relay --node-id r4 --topology config\topology_6node.json --coordinator http://127.0.0.1:8765
+```
+
+```powershell
+# Bob
+cd C:\Users\SI\Documents\qkd-network\qkd-secure-messaging
+$env:QKD_PROVISION_TOKEN = 'replace-with-a-long-random-local-token'
+.\.venv\Scripts\python.exe -m qkd_demo.node --role bob --node-id bob --topology config\topology_6node.json --coordinator http://127.0.0.1:8765
+```
+
+Each node uses its `http_port` for the KME API and its `app_port` for TCP messaging from the topology file. `--app-port` explicitly overrides the configured application port. With no topology file, the older default remains the HTTP port plus two.
+
+Creating keys takes longer than on the four-node default because the coordinator runs a separate SeQUeNCe simulation for each of the eight links. The network map is laid out from the selected topology, including relay layers and links. The `experiments/moving_eve.py` and `experiments/benchmark_network.py` scripts support only the four-link default in `config/topology.json`; they stop with a clear message if run against this larger topology.

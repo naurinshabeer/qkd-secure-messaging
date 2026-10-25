@@ -37,6 +37,16 @@ SCENARIOS = (
 )
 
 
+def require_default_topology(state: dict[str, Any]) -> None:
+    link_ids = {link.get("id") for link in state.get("links", [])}
+    if not state.get("topology") or link_ids != set(LINKS):
+        actual = ", ".join(sorted(str(link_id) for link_id in link_ids)) or "none"
+        raise RuntimeError(
+            f"experiments/moving_eve.py supports only config/topology.json (the four-link default); "
+            f"the coordinator reported links: {actual}."
+        )
+
+
 def post_json(base_url: str, path: str, payload: dict[str, Any], timeout: float = 8) -> dict[str, Any]:
     request = urllib.request.Request(base_url.rstrip("/") + path,
         data=json.dumps(payload).encode("utf-8"),
@@ -184,8 +194,7 @@ def _shortest(paths: list[list[str]], link_by_id: dict[str, dict[str, Any]], blo
 def run_scenario(base_url: str, output: Path, messages: int, eve_fraction: float,
                  scenarios: tuple[tuple[str, tuple[str, ...]], ...] = SCENARIOS) -> list[dict[str, Any]]:
     initial = _get_initial_state(base_url)
-    if not initial.get("topology"):
-        raise RuntimeError("Coordinator responded but does not expose the relay topology API.")
+    require_default_topology(initial)
     paths = initial.get("paths", [])
     rows: list[dict[str, Any]] = []
     try:

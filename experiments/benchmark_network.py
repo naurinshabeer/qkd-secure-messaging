@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 GENERATE_TIMEOUT = 900
+EXPECTED_LINK_IDS = frozenset(("A-R1", "R1-B", "A-R2", "R2-B"))
 
 
 def request_json(base_url: str, path: str, payload: dict[str, Any] | None = None,
@@ -24,6 +25,16 @@ def request_json(base_url: str, path: str, payload: dict[str, Any] | None = None
                                      method="POST" if payload is not None else "GET")
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read())
+
+
+def require_default_topology(state: dict[str, Any]) -> None:
+    link_ids = {link.get("id") for link in state.get("links", [])}
+    if not state.get("topology") or link_ids != EXPECTED_LINK_IDS:
+        actual = ", ".join(sorted(str(link_id) for link_id in link_ids)) or "none"
+        raise RuntimeError(
+            "experiments/benchmark_network.py supports only config/topology.json (the four-link default); "
+            f"the coordinator reported links: {actual}."
+        )
 
 
 def percentile95(values: list[float]) -> float:
@@ -62,7 +73,8 @@ def run_benchmark(base_url: str, topology_path: Path, output_dir: Path, message_
         state = request_json(base_url, "/api/state")
     except (OSError, urllib.error.URLError, ValueError) as exc:
         raise RuntimeError(f"Local network is not running at {base_url}: {exc}") from exc
-    if not state.get("topology") or not state.get("paths"):
+    require_default_topology(state)
+    if not state.get("paths"):
         raise RuntimeError("The running coordinator does not expose the trusted-relay topology.")
     topology = json.loads(topology_path.read_text(encoding="utf-8"))
     if not {"nodes", "links"}.issubset(topology):
