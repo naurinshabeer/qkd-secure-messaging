@@ -26,6 +26,7 @@ from qkd_demo.key_manager import KMEError, KeyManager
 from qkd_demo.protocol import (
     TYPE_ACK, TYPE_MESSAGE, TYPE_NACK, TYPE_OUTCOME, TYPE_OUTCOME_QUERY, TYPE_KEY_TRANSPORT, Frame, ProtocolError, recv_frame, send_frame,
 )
+from qkd_demo.topology import TopologyError, load_topology, validate_topology
 
 HTTP_TIMEOUT = 3.0
 SOCKET_TIMEOUT = 3.0
@@ -69,6 +70,8 @@ class NodeRuntime:
                  node_id: str | None = None, topology: dict[str, Any] | None = None):
         if role not in ("alice", "bob", "relay"):
             raise ValueError("role must be alice, bob, or relay")
+        if topology is not None:
+            validate_topology(topology)
         self.role = role
         self.topology = topology or {}
         self.own_id = node_id or role
@@ -678,6 +681,15 @@ def run_node(runtime: NodeRuntime) -> None:
         tcp_server.server_close()
 
 
+def resolve_app_port(topology: dict[str, Any] | None, node_id: str,
+                     http_port: int, app_port_override: int | None = None) -> int:
+    if app_port_override is not None:
+        return app_port_override
+    if topology is not None and node_id in topology.get("nodes", {}):
+        return int(topology["nodes"][node_id]["app_port"])
+    return http_port + 2
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run one QKD application node and its local KME.")
     parser.add_argument("--role", required=True, choices=("alice", "bob", "relay"))
@@ -701,15 +713,17 @@ def main() -> None:
     node_id = args.node_id or args.role
     if args.topology:
         try:
-            topology = json.loads(open(args.topology, encoding="utf-8").read())
-            node = topology["nodes"][node_id]
+            topology = load_topology(args.topology)
+            node = topology["nodes"].get(node_id)
+            if node is None:
+                parser.error(f"Node ID {node_id!r} is not present in the topology.")
             if node["role"] != args.role:
                 parser.error("--role does not match the selected topology node.")
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (TopologyError, KeyError, TypeError) as exc:
             parser.error(f"Invalid topology file or node ID: {exc}")
     default_http = int(topology["nodes"][node_id]["http_port"]) if topology else (8766 if args.role == "alice" else 8767)
     http_port = args.port or default_http
-    app_port = args.app_port or http_port + 2
+    app_port = resolve_app_port(topology, node_id, http_port, args.app_port)
     peer_host, peer_port = (None, None)
     if args.peer:
         try:

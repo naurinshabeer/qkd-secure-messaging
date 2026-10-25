@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
 from qkd_demo.node import json_request
 from qkd_demo.sequence_link import LinkSettings, run_sequence_bb84
+from qkd_demo.topology import TopologyError, load_topology, validate_topology
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 POOL_LIMIT = 24
@@ -70,6 +71,8 @@ class CoordinatorService:
     """Owns experiment metadata only; Alice and Bob retain separate KME pools."""
 
     def __init__(self, alice_url: str, bob_url: str, topology: dict[str, Any] | None = None):
+        if topology is not None:
+            validate_topology(topology)
         self.topology = topology
         if topology:
             self.node_urls = {node_id: f"http://127.0.0.1:{int(node['http_port'])}"
@@ -509,13 +512,11 @@ def main() -> None:
         parser.error("Alice and Bob must be on 127.0.0.1.")
     if not os.getenv("QKD_PROVISION_TOKEN") and not args.insecure_dev:
         parser.error("Set QKD_PROVISION_TOKEN or pass --insecure-dev.")
-    topology = None
     topology_file = Path(args.topology)
-    if topology_file.is_file():
-        try:
-            topology = json.loads(topology_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            parser.error(f"Could not read topology JSON: {exc}")
+    try:
+        topology = load_topology(topology_file)
+    except TopologyError as exc:
+        parser.error(str(exc))
     server = CoordinatorHTTPServer((args.host, args.port), CoordinatorService(args.alice, args.bob, topology))
     print(f"Coordinator and dashboard listening at http://{args.host}:{args.port}")
     try:

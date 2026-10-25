@@ -1,0 +1,20 @@
+{
+ "nodes": {
+  "alice": {"role": "alice", "http_port": 8766, "app_port": 8768},
+  "r1": {"role": "relay", "http_port": 8770, "app_port": 8772},
+  "r2": {"role": "relay", "http_port": 8774, "app_port": 8776},
+  "r3": {"role": "relay", "http_port": 8778, "app_port": 8780},
+  "r4": {"role": "relay", "http_port": 8782, "app_port": 8784},
+  "bob": {"role": "bob", "http_port": 8767, "app_port": 8769}
+ },
+ "links": [
+  {"id": "A-R1", "a": "alice", "b": "r1", "distance_km": 8.0, "noise": 0.01, "eve": 0.0, "up": true},
+  {"id": "A-R2", "a": "alice", "b": "r2", "distance_km": 10.0, "noise": 0.01, "eve": 0.0, "up": true},
+  {"id": "R1-R3", "a": "r1", "b": "r3", "distance_km": 6.0, "noise": 0.01, "eve": 0.0, "up": true},
+  {"id": "R2-R3", "a": "r2", "b": "r3", "distance_km": 5.0, "noise": 0.01, "eve": 0.0, "up": true},
+  {"id": "R1-B", "a": "r1", "b": "bob", "distance_km": 7.0, "noise": 0.01, "eve": 0.0, "up": true},
+  {"id": "R3-B", "a": "r3", "b": "bob", "distance_km": 9.0, "noise": 0.01, "eve": 0.0, "up": true},
+  {"id": "R2-R4", "a": "r2", "b": "r4", "distance_km": 7.0, "noise": 0.01, "eve": 0.0, "up": true},
+  {"id": "R4-B", "a": "r4", "b": "bob", "distance_km": 8.0, "noise": 0.01, "eve": 0.0, "up": true}
+ ]
+}
